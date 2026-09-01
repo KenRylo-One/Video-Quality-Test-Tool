@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/vqa-core",
+    "crates/vqa-backends",
+    "crates/vqa-run",
+    "crates/vqa-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+vqa-core = { path = "crates/vqa-core" }
+vqa-backends = { path = "crates/vqa-backends" }
+vqa-run = { path = "crates/vqa-run" }
+
+anyhow = "1.0"
+directories = "6.0"
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.36"
+egui_extras = "0.36"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.11"
+thiserror = "2.0"
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = "thin"
+strip = true
