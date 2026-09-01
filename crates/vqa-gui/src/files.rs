@@ -4,13 +4,14 @@
 //! name to promote it to reference.
 
 use crate::theme::Tokens;
-use crate::widgets::{card, diff_mark, mono, sans, section_header};
+use crate::widgets::{card, diff_mark, mono, sans, section_header_with};
 use egui::{Margin, Stroke, Ui};
+use std::path::PathBuf;
 use vqa_core::set::FileId;
 use vqa_run::Session;
 
 /// What the user did in this section.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesAction {
     /// Nothing.
     None,
@@ -20,13 +21,30 @@ pub enum FilesAction {
     Remove(FileId),
     /// Move the first file to the place of the second.
     Move(FileId, FileId),
+    /// Add every one of these files to the comparison.
+    Import(Vec<PathBuf>),
 }
 
 /// Draws section 1 and reports what the user did.
+///
+/// Drag and drop needs the operating system to tell the window which file was
+/// dropped. Wayland gives no such message to this kind of window, on any Linux
+/// desktop, so the Import videos button is not a fallback. On Wayland, it is the
+/// only way in.
 pub fn show(ui: &mut Ui, tokens: &Tokens, session: &Session) -> FilesAction {
     let mut action = FilesAction::None;
 
-    section_header(ui, tokens, "1", "Files");
+    section_header_with(ui, tokens, "1", "Files", |ui| {
+        if ui
+            .button(sans("Import videos", 11.5, tokens.text))
+            .clicked()
+        {
+            let paths = pick_video_files();
+            if !paths.is_empty() {
+                action = FilesAction::Import(paths);
+            }
+        }
+    });
 
     if session.files.is_empty() {
         drop_zone(ui, tokens, true);
@@ -148,11 +166,14 @@ fn row(
 }
 
 /// The strip that takes dropped files.
+///
+/// Drag and drop works when the operating system supports it. On Wayland it does not,
+/// so the hint always names the button too.
 fn drop_zone(ui: &mut Ui, tokens: &Tokens, is_empty: bool) {
     let hint = if is_empty {
-        "Drop the reference and the encodes here. The first file becomes the reference."
+        "Drop the reference and the encodes here, or press Import videos above. The first file becomes the reference."
     } else {
-        "Drop files here. Click a file name to make it the reference."
+        "Drop files here, or press Import videos above. Click a file name to make it the reference."
     };
 
     egui::Frame::default()
@@ -166,4 +187,21 @@ fn drop_zone(ui: &mut Ui, tokens: &Tokens, is_empty: bool) {
                 ui.label(sans(hint, 11.5, tokens.text_muted));
             });
         });
+}
+
+/// Opens the native file picker, and reports every video file that the user chose.
+///
+/// Returns an empty list when the user cancels the dialog.
+fn pick_video_files() -> Vec<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Import videos")
+        .add_filter(
+            "Video",
+            &[
+                "mp4", "mkv", "mov", "webm", "avi", "m4v", "ts", "wmv", "flv",
+            ],
+        )
+        .add_filter("All files", &["*"])
+        .pick_files()
+        .unwrap_or_default()
 }

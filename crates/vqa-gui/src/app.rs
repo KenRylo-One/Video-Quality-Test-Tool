@@ -139,6 +139,11 @@ impl VqaApp {
             FilesAction::Promote(id) => self.session.promote_to_reference(id),
             FilesAction::Remove(id) => self.session.remove_file(id),
             FilesAction::Move(moved, target) => self.session.files.move_before(moved, target),
+            FilesAction::Import(paths) => {
+                for path in paths {
+                    self.session.add_file(&path);
+                }
+            }
         }
 
         ui.add_space(SECTION_GAP);
