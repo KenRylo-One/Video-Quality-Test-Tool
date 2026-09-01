@@ -114,6 +114,84 @@ impl RunState {
                 }
             }
         }
+        self.is_running()
+    }
+
+    /// True until every encode has finished, one way or another.
+    pub fn is_running(&self) -> bool {
         self.encodes_remaining > 0
+    }
+
+    #[cfg(test)]
+    fn for_test(encodes_remaining: usize, receiver: Receiver<SupervisorEvent>) -> Self {
+        Self {
+            receiver,
+            encodes_remaining,
+            results: HashMap::new(),
+            failures: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vqa_core::metric::HarmonicMean;
+    use vqa_core::pooling::pool;
+
+    #[test]
+    fn is_running_stays_true_while_an_encode_is_still_working() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = RunState::for_test(2, receiver);
+
+        let pooled = pool(&[1.0], HarmonicMean::Allowed).unwrap();
+        sender
+            .send(SupervisorEvent::MetricReady {
+                encode: FileId(1),
+                metric: MetricId::PsnrY,
+                pooled,
+            })
+            .unwrap();
+        sender
+            .send(SupervisorEvent::EncodeDone { encode: FileId(1) })
+            .unwrap();
+
+        assert!(state.poll());
+        assert!(state.is_running());
+    }
+
+    #[test]
+    fn is_running_turns_false_once_every_encode_is_done() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = RunState::for_test(2, receiver);
+
+        sender
+            .send(SupervisorEvent::EncodeDone { encode: FileId(1) })
+            .unwrap();
+        sender
+            .send(SupervisorEvent::EncodeDone { encode: FileId(2) })
+            .unwrap();
+
+        assert!(!state.poll());
+        assert!(!state.is_running());
+    }
+
+    #[test]
+    fn a_failed_encode_still_counts_toward_encode_done() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = RunState::for_test(1, receiver);
+
+        sender
+            .send(SupervisorEvent::Failed {
+                encode: FileId(1),
+                error: "no ffmpeg".to_string(),
+            })
+            .unwrap();
+        sender
+            .send(SupervisorEvent::EncodeDone { encode: FileId(1) })
+            .unwrap();
+
+        assert!(!state.poll());
+        assert_eq!(state.failures.len(), 1);
     }
 }

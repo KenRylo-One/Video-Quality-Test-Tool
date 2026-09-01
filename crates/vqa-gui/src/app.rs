@@ -107,7 +107,7 @@ impl VqaApp {
                         }
 
                         ui.add_space(8.0);
-                        if self.run.is_some() {
+                        if self.run.as_ref().is_some_and(RunState::is_running) {
                             ui.label(sans("Running…", 12.5, self.tokens.text));
                         } else {
                             let can_run = self.session.files.reference().is_some()
