@@ -1,0 +1,169 @@
+//! Section 1: the files.
+//!
+//! Drag files onto the page. The first file becomes the reference. Click any other file
+//! name to promote it to reference.
+
+use crate::theme::Tokens;
+use crate::widgets::{card, diff_mark, mono, sans, section_header};
+use egui::{Margin, Stroke, Ui};
+use vqa_core::set::FileId;
+use vqa_run::Session;
+
+/// What the user did in this section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilesAction {
+    /// Nothing.
+    None,
+    /// Make this file the reference.
+    Promote(FileId),
+    /// Take this file out of the comparison.
+    Remove(FileId),
+    /// Move the first file to the place of the second.
+    Move(FileId, FileId),
+}
+
+/// Draws section 1 and reports what the user did.
+pub fn show(ui: &mut Ui, tokens: &Tokens, session: &Session) -> FilesAction {
+    let mut action = FilesAction::None;
+
+    section_header(ui, tokens, "1", "Files");
+
+    if session.files.is_empty() {
+        drop_zone(ui, tokens, true);
+        return action;
+    }
+
+    card(ui, tokens, |ui| {
+        ui.set_width(ui.available_width());
+
+        if let Some(reference) = session.files.reference() {
+            row(ui, tokens, session, reference.id, true, &mut action);
+        }
+
+        let encodes: Vec<FileId> = session.files.encodes().map(|file| file.id).collect();
+        for id in encodes {
+            ui.add_space(4.0);
+            row(ui, tokens, session, id, false, &mut action);
+        }
+    });
+
+    if session.files.exceeds_palette() {
+        ui.add_space(4.0);
+        ui.label(
+            sans(
+                "More than eight encodes. The palette holds eight slots, so the graphs draw small multiples.",
+                11.0,
+                tokens.text_muted,
+            )
+            .italics(),
+        );
+    }
+
+    ui.add_space(8.0);
+    drop_zone(ui, tokens, false);
+    action
+}
+
+/// One file row.
+fn row(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    session: &Session,
+    id: FileId,
+    is_reference: bool,
+    action: &mut FilesAction,
+) {
+    let Some(file) = session.files.get(id) else {
+        return;
+    };
+    let marks = session.files.diff_marks(id);
+    let row_id = egui::Id::new(("file-row", id.0));
+
+    let response = ui.dnd_drag_source(row_id, id, |ui| {
+        ui.horizontal(|ui| {
+            if is_reference {
+                ui.label(mono("REFERENCE", 10.0, tokens.accent));
+            } else {
+                ui.label(mono("⠿", 11.0, tokens.text_muted))
+                    .on_hover_text("Drag to reorder.");
+            }
+
+            if is_reference {
+                ui.label(sans(&file.label, 12.5, tokens.text));
+            } else {
+                let name = ui.add(
+                    egui::Label::new(sans(&file.label, 12.5, tokens.text).underline())
+                        .sense(egui::Sense::click()),
+                );
+                if name.on_hover_text("Click to make this file the reference.").clicked() {
+                    *action = FilesAction::Promote(id);
+                }
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !is_reference {
+                    let remove = ui.add(
+                        egui::Label::new(mono("✕", 11.0, tokens.text_muted)).sense(egui::Sense::click()),
+                    );
+                    if remove.on_hover_text("Remove this file from the comparison.").clicked() {
+                        *action = FilesAction::Remove(id);
+                    }
+                }
+            });
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(mono(file.info.resolution_label(), 11.0, tokens.text_secondary));
+            if marks.resolution {
+                diff_mark(ui, tokens, "The frame size differs from the reference. Correction C2 scales the encode up.");
+            }
+            ui.label(mono(&file.info.codec, 11.0, tokens.text_secondary));
+            ui.label(mono(&file.info.pix_fmt, 11.0, tokens.text_secondary));
+            ui.label(mono(file.info.color_range.tag(), 11.0, tokens.text_secondary));
+            if marks.color_range {
+                diff_mark(ui, tokens, "The color range differs from the reference. Correction C1 converts it.");
+            }
+            ui.label(mono(file.info.frame_rate.label(), 11.0, tokens.text_secondary));
+            match file.info.frame_count() {
+                Some(frames) => {
+                    ui.label(mono(format!("{frames} fr"), 11.0, tokens.text_secondary));
+                    if marks.frame_count {
+                        diff_mark(ui, tokens, "The frame count differs from the reference. Correction C3 handles it.");
+                    }
+                }
+                None => {
+                    ui.label(mono("? fr", 11.0, tokens.text_muted));
+                }
+            }
+            ui.label(mono(file.info.bitrate_label(), 11.0, tokens.text_secondary));
+        });
+    });
+
+    if let Some(dragged) = response.response.dnd_release_payload::<FileId>() {
+        if *dragged != id {
+            *action = FilesAction::Move(*dragged, id);
+        }
+    }
+}
+
+/// The strip that takes dropped files.
+fn drop_zone(ui: &mut Ui, tokens: &Tokens, is_empty: bool) {
+    let hint = if is_empty {
+        "Drop the reference and the encodes here. The first file becomes the reference."
+    } else {
+        "Drop files here. Click a file name to make it the reference."
+    };
+
+    egui::Frame::default()
+        .fill(tokens.panel)
+        .stroke(Stroke::new(1.0, tokens.border_strong))
+        .corner_radius(crate::theme::RADIUS)
+        .inner_margin(Margin::symmetric(10, 14))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.vertical_centered(|ui| {
+                ui.label(sans(hint, 11.5, tokens.text_muted));
+            });
+        });
+}
