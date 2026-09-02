@@ -5,6 +5,7 @@
 
 use crate::files::{self, FilesAction};
 use crate::metrics::{self, MetricsAction, MetricsUi};
+use crate::notes;
 use crate::run::RunState;
 use crate::settings_panel::{self, SettingsUi};
 use crate::theme::Tokens;
@@ -233,6 +234,20 @@ impl eframe::App for VqaApp {
                             .map_or(&no_results, |run_state| &run_state.results);
                         ui.vertical(|ui| right::show(ui, &self.tokens, &self.session, results));
                     });
+
+                    let has_results = self
+                        .run
+                        .as_ref()
+                        .is_some_and(|run_state| !run_state.results.is_empty());
+                    if has_results {
+                        ui.add_space(SECTION_GAP);
+                        let no_notes = Vec::new();
+                        let run_notes = self
+                            .run
+                            .as_ref()
+                            .map_or(&no_notes, |run_state| &run_state.notes);
+                        notes::show(ui, &self.tokens, run_notes);
+                    }
                 });
             });
     }

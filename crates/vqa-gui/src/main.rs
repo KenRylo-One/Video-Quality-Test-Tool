@@ -6,6 +6,7 @@ mod app;
 mod files;
 mod fonts;
 mod metrics;
+mod notes;
 mod right;
 mod run;
 mod settings_panel;
