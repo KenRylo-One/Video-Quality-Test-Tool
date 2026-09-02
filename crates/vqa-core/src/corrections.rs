@@ -9,6 +9,17 @@ pub enum CorrectionId {
     FrameCount,
 }
 
+impl CorrectionId {
+    /// A short category name, shown before the correction's own message.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ColorRange => "Color range",
+            Self::Resolution => "Resolution",
+            Self::FrameCount => "Frame count",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoteId {
     RangeFlagDisagreesWithData,
@@ -70,8 +81,9 @@ pub fn detect_color_range(
         id: CorrectionId::ColorRange,
         target_label: target_label.to_string(),
         message: format!(
-            "Converted {} range to {} range for the measurement.",
+            "{target_label} is {} range. The reference is {} range. Converted the encode to {} range for the measurement.",
             from.tag(),
+            to.tag(),
             to.tag()
         ),
         detail: CorrectionDetail::ColorRange { from, to },
@@ -94,7 +106,7 @@ pub fn detect_resolution(
         id: CorrectionId::Resolution,
         target_label: target_label.to_string(),
         message: format!(
-            "Scaled {}x{} to {}x{}, bicubic.",
+            "{target_label} was scaled from {}x{} to {}x{}, bicubic. The encode is always scaled up. The reference is never scaled down.",
             encode.width, encode.height, reference.width, reference.height
         ),
         detail: CorrectionDetail::Resolution {
@@ -249,6 +261,22 @@ pub struct DetectedCorrections {
     pub corrections: Vec<Correction>,
     pub notes: Vec<Note>,
     pub frame_range: Option<(u64, u64)>,
+}
+
+impl DetectedCorrections {
+    /// Every correction and every note, as one flat list of lines, in the interface's
+    /// single Notes list. A correction's line starts with its category name. A note's
+    /// line does not, since a note already reads as a plain sentence.
+    pub fn display_lines(&self) -> Vec<String> {
+        let mut lines = Vec::with_capacity(self.corrections.len() + self.notes.len());
+        for correction in &self.corrections {
+            lines.push(format!("{}: {}", correction.id.label(), correction.message));
+        }
+        for note in &self.notes {
+            lines.push(note.message.clone());
+        }
+        lines
+    }
 }
 
 /// Runs every detector for one reference and encode pair.
@@ -455,5 +483,30 @@ mod tests {
                 .iter()
                 .any(|note| note.message.contains("saturates near lossless"))
         );
+    }
+
+    #[test]
+    fn display_lines_names_the_category_for_a_correction_and_not_for_a_note() {
+        let reference = media_info(1920, 1080, ColorRange::Tv, "yuv420p", "h264", 150);
+        let encode = media_info(1920, 1080, ColorRange::Pc, "yuv420p", "h264", 150);
+        let detected = detect_all(&reference, &encode, "encode.mp4", None);
+
+        let lines = detected.display_lines();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("Color range: encode.mp4 is"));
+    }
+
+    #[test]
+    fn display_lines_puts_every_correction_before_every_note() {
+        let reference = media_info(1920, 1080, ColorRange::Tv, "yuv420p", "prores", 150);
+        let encode = media_info(3840, 2160, ColorRange::Pc, "yuv420p", "h264", 150);
+        let detected = detect_all(&reference, &encode, "encode.mp4", None);
+
+        let lines = detected.display_lines();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("Color range:"));
+        assert!(lines[1].starts_with("Resolution:"));
+        assert!(!lines[2].starts_with("Near-lossless"));
+        assert!(lines[2].contains("near-lossless"));
     }
 }
