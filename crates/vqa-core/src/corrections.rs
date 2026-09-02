@@ -14,9 +14,9 @@ pub enum NoteId {
     RangeFlagDisagreesWithData,
     NearLosslessReference,
     KnownMetricFault,
-    /// C3 assumes both files start at the same frame. It cannot tell a file trimmed at
-    /// the end from a file trimmed at the start, so it names the assumption every time
-    /// it fires.
+    /// The frame count fix assumes both files start at the same frame. It cannot tell
+    /// a file trimmed at the end from a file trimmed at the start, so it names the
+    /// assumption every time it fires.
     FrameCountAlignmentAssumed,
 }
 

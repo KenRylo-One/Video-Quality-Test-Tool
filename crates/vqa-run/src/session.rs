@@ -143,10 +143,12 @@ impl Session {
             .map(|found| FfprobeProbe::new(found.path.clone()))
     }
 
-    /// The real luma minimum and maximum of a sample of frames, for note N1.
+    /// The real luma minimum and maximum of a sample of frames.
     ///
-    /// Returns nothing with no `ffprobe`, or when the read fails. Nothing blocks on
-    /// this, so a failed sample just means the note never fires for this file.
+    /// This is how the tool tells a genuinely full-range file from one that carries the
+    /// wrong flag. Returns nothing with no `ffprobe`, or when the read fails. Nothing
+    /// blocks on this, so a failed sample just means the check never fires for this
+    /// file.
     pub fn luma_extremes(&self, path: &Path) -> Option<LumaExtremes> {
         self.probe()?
             .luma_extremes(path, FrameSample::default())

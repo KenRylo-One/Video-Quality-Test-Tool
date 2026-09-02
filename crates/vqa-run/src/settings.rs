@@ -47,7 +47,8 @@ pub struct Settings {
     #[serde(default)]
     pub binary_paths: BTreeMap<BinaryId, PathBuf>,
 
-    /// The VMAF viewing distance, in picture heights. This feeds correction C5.
+    /// The VMAF viewing distance, in picture heights. This chooses which VMAF model
+    /// the tool measures with.
     #[serde(default = "default_viewing_distance")]
     pub vmaf_viewing_distance: f32,
 

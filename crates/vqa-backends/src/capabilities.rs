@@ -79,8 +79,9 @@ pub fn parse_ffmpeg_filters(text: &str) -> BTreeSet<String> {
 /// names, so the capability probe cannot read the real set. The tool therefore assumes
 /// this set whenever the `libvmaf` filter is present.
 ///
-/// M3 builds the `libvmaf` back end. It must replace this assumption with a real answer,
-/// because a missing feature gives an error at run time and not before the run.
+/// A later milestone builds the `libvmaf` back end. It must replace this assumption
+/// with a real answer, because a missing feature gives an error at run time and not
+/// before the run.
 pub const ASSUMED_LIBVMAF_FEATURES: &[&str] = &[
     "psnr",
     "float_ssim",
@@ -109,7 +110,7 @@ pub const KNOWN_VSHIP_METRICS: &[&str] = &["SSIMULACRA2", "BUTTERAUGLI", "CVVDP"
 ///
 /// When the help text names none of them, the tool assumes all three. FFVship exists to
 /// give these three metrics, so a binary that names none is a parser problem and not a
-/// reason to hide a metric. M4 replaces this with a measured answer.
+/// reason to hide a metric. A later milestone replaces this with a measured answer.
 pub fn parse_vship_metrics(help: &str) -> BTreeSet<String> {
     let upper = help.to_ascii_uppercase();
     let found: BTreeSet<String> = KNOWN_VSHIP_METRICS

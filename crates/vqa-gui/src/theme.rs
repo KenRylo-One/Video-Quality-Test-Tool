@@ -99,7 +99,7 @@ pub const LIGHT: Tokens = Tokens {
 /// The flat gray behind the three frames of the frame viewer.
 ///
 /// This value is the same in both themes, and it is deliberate. A tinted surround changes
-/// how a person judges an image. Milestone M6 draws the frame viewer.
+/// how a person judges an image. A later milestone draws the frame viewer.
 #[allow(dead_code)]
 pub const FRAME_VIEWER_GRAY: Color32 = rgb(0x808080);
 
@@ -114,7 +114,7 @@ impl Tokens {
         }
     }
 
-    /// The color of one series slot. Milestone M5 draws the graphs.
+    /// The color of one series slot. A later milestone draws the graphs.
     #[allow(dead_code)]
     pub fn series(&self, slot: usize) -> Color32 {
         match series_color(self.theme, slot) {

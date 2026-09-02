@@ -99,7 +99,8 @@ impl Rational {
         text.trim_end_matches('0').trim_end_matches('.').to_string()
     }
 
-    /// True for 50 fps and above. This chooses an `_hfr` VMAF model in correction C5.
+    /// True for 50 fps and above. This chooses an `_hfr` VMAF model when the tool picks
+    /// the model for a measurement.
     pub fn is_high_frame_rate(self) -> bool {
         self.as_f64() >= 49.0
     }
@@ -267,8 +268,8 @@ impl MediaInfo {
 
 /// The real luma minimum and maximum of a sample of frames.
 ///
-/// The flag can disagree with the data. That case becomes note N1, which the tool
-/// reports and never corrects.
+/// The flag can disagree with the data. The tool reports that case, and never
+/// corrects it, since it cannot tell a wrong flag from low-contrast content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LumaExtremes {
     /// How many frames the sample held.

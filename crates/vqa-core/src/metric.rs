@@ -419,7 +419,7 @@ pub const REGISTRY: &[MetricDef] = &[
             hint: None,
         }],
         notes: &[
-            "The direction and the range of CIEDE2000 are measured in M3. Read the value with care until then.",
+            "The direction and the range of CIEDE2000 are not yet measured. Read the value with care until then.",
         ],
     },
     MetricDef {

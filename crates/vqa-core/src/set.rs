@@ -31,11 +31,12 @@ pub struct MediaFile {
 /// will correct the difference, and it is not a fault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DiffMarks {
-    /// The encode has a different frame size. Correction C2 scales it up.
+    /// The encode has a different frame size. The tool scales it up to match.
     pub resolution: bool,
-    /// The encode has a different color range flag. Correction C1 converts it.
+    /// The encode has a different color range flag. The tool converts it to match.
     pub color_range: bool,
-    /// The encode reports a different frame count. Correction C3 handles it.
+    /// The encode reports a different frame count. The tool measures the frames both
+    /// files share.
     pub frame_count: bool,
 }
 

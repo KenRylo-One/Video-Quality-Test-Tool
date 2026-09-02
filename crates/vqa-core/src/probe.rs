@@ -16,6 +16,7 @@ pub trait MediaProbe {
 
     /// Reads the real luma minimum and maximum from a sample of frames.
     ///
-    /// The color range flag can disagree with the data. That case becomes note N1.
+    /// The color range flag can disagree with the data. The tool reports that, and
+    /// corrects nothing, since it cannot tell a wrong flag from low-contrast content.
     fn luma_extremes(&self, path: &Path, sample: FrameSample) -> Result<LumaExtremes, Self::Error>;
 }

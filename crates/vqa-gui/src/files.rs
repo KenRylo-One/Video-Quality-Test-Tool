@@ -134,20 +134,20 @@ fn row(
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.label(mono(file.info.resolution_label(), 11.0, tokens.text_secondary));
             if marks.resolution {
-                diff_mark(ui, tokens, "The frame size differs from the reference. Correction C2 scales the encode up.");
+                diff_mark(ui, tokens, "The frame size differs from the reference. The tool scales the encode up to match.");
             }
             ui.label(mono(&file.info.codec, 11.0, tokens.text_secondary));
             ui.label(mono(&file.info.pix_fmt, 11.0, tokens.text_secondary));
             ui.label(mono(file.info.color_range.tag(), 11.0, tokens.text_secondary));
             if marks.color_range {
-                diff_mark(ui, tokens, "The color range differs from the reference. Correction C1 converts it.");
+                diff_mark(ui, tokens, "The color range differs from the reference. The tool converts the encode to match.");
             }
             ui.label(mono(file.info.frame_rate.label(), 11.0, tokens.text_secondary));
             match file.info.frame_count() {
                 Some(frames) => {
                     ui.label(mono(format!("{frames} fr"), 11.0, tokens.text_secondary));
                     if marks.frame_count {
-                        diff_mark(ui, tokens, "The frame count differs from the reference. Correction C3 handles it.");
+                        diff_mark(ui, tokens, "The frame count differs from the reference. The tool measures the frames both files share.");
                     }
                 }
                 None => {
