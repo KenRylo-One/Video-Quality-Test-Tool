@@ -10,6 +10,7 @@ pub mod ffmpeg;
 pub mod ffprobe;
 pub mod hash;
 pub mod parse;
+pub mod vmaf_model;
 
 pub use discovery::{Discovery, discover, find_path, probe_binary};
 pub use error::BackendError;

@@ -70,16 +70,15 @@ pub fn parse_stats_file(
     metric: MetricId,
     sink: &mut dyn FrameSink,
 ) -> vqa_core::Result<()> {
+    if format == LogFormat::VmafCsv {
+        return crate::parse::vmaf_csv::parse_vmaf_csv(reader, metric, sink);
+    }
+
     let parse_line: fn(&str) -> Option<(u64, f32)> = match format {
         LogFormat::PsnrStats => parse_psnr_line,
         LogFormat::SsimStats => parse_ssim_line,
         LogFormat::XpsnrStats => parse_xpsnr_line,
-        LogFormat::VmafCsv => {
-            return Err(vqa_core::CoreError::parse(
-                "stats file",
-                "VMAF CSV needs the vmaf_csv parser",
-            ));
-        }
+        LogFormat::VmafCsv => unreachable!("handled above"),
     };
 
     for line in reader.lines() {

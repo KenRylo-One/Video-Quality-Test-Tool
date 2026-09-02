@@ -3,7 +3,7 @@ use std::io::BufReader;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use vqa_backends::parse::stats_file::parse_stats_file;
-use vqa_core::backend::{BufferSink, Invocation, LogFormat, ProcessRunner, Progress};
+use vqa_core::backend::{BufferSink, Invocation, ProcessRunner, Progress};
 use vqa_core::capability::LaneKind;
 use vqa_core::metric::MetricId;
 use vqa_core::pooling::{Pooled, pool};
@@ -194,23 +194,19 @@ fn run_one(item: &WorkItem, runner: &dyn ProcessRunner, sender: &Sender<Supervis
     let _ = exit_report;
 
     for artifact in &item.invocation.expects {
-        let Some(metric) = artifact.metrics.first().copied() else {
-            continue;
-        };
-        if artifact.format == LogFormat::VmafCsv {
-            continue;
-        }
-        match read_pooled(artifact, metric) {
-            Ok(Some(pooled)) => {
-                let _ = sender.send(SupervisorEvent::MetricReady {
-                    encode,
-                    metric,
-                    pooled,
-                });
-            }
-            Ok(None) => {}
-            Err(error) => {
-                let _ = sender.send(SupervisorEvent::Failed { encode, error });
+        for metric in artifact.metrics.iter().copied() {
+            match read_pooled(artifact, metric) {
+                Ok(Some(pooled)) => {
+                    let _ = sender.send(SupervisorEvent::MetricReady {
+                        encode,
+                        metric,
+                        pooled,
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let _ = sender.send(SupervisorEvent::Failed { encode, error });
+                }
             }
         }
     }
@@ -232,7 +228,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use vqa_core::CoreError;
-    use vqa_core::backend::{ExitReport, LogArtifact};
+    use vqa_core::backend::{ExitReport, LogArtifact, LogFormat};
 
     struct FakeRunner {
         succeed: bool,
