@@ -406,9 +406,9 @@ pub const REGISTRY: &[MetricDef] = &[
         label: "CIEDE2000",
         group: MetricGroup::LibVmaf,
         unit: Unit::Index,
-        range: "not settled by measurement yet.",
-        direction: Direction::Unknown,
-        harmonic_mean: HarmonicMean::Blocked("The direction and the range are not settled."),
+        range: "0 to about 50, unbounded upward, infinite at a perfect match",
+        direction: Direction::HigherIsBetter,
+        harmonic_mean: HarmonicMean::Allowed,
         providers: &[Provider {
             binary: BinaryId::Ffmpeg,
             implementation: "libvmaf ciede feature",
@@ -419,7 +419,7 @@ pub const REGISTRY: &[MetricDef] = &[
             hint: None,
         }],
         notes: &[
-            "The direction and the range of CIEDE2000 are not yet measured. Read the value with care until then.",
+            "Measured for real: an identical pair gives an infinite value, and a differing pair gives a finite, lower value, the same shape PSNR has. Higher is better.",
         ],
     },
     MetricDef {

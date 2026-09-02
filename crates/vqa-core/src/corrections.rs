@@ -1,12 +1,16 @@
 use crate::media::{ColorRange, LumaExtremes, MediaInfo};
 use crate::metric::MetricId;
+use crate::vmaf_model::{self, VmafModel};
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CorrectionId {
     ColorRange,
     Resolution,
     FrameCount,
+    CambiEncodeSize,
+    VmafModel,
 }
 
 impl CorrectionId {
@@ -16,6 +20,8 @@ impl CorrectionId {
             Self::ColorRange => "Color range",
             Self::Resolution => "Resolution",
             Self::FrameCount => "Frame count",
+            Self::CambiEncodeSize => "CAMBI encode size",
+            Self::VmafModel => "VMAF model",
         }
     }
 }
@@ -31,7 +37,7 @@ pub enum NoteId {
     FrameCountAlignmentAssumed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CorrectionDetail {
     ColorRange {
         from: ColorRange,
@@ -44,6 +50,14 @@ pub enum CorrectionDetail {
     FrameCount {
         first_frame: u64,
         last_frame: u64,
+    },
+    CambiEncodeSize {
+        width: u32,
+        height: u32,
+        bit_depth: u8,
+    },
+    VmafModel {
+        path: PathBuf,
     },
 }
 
@@ -175,6 +189,93 @@ pub fn detect_frame_count(
     }
 }
 
+/// Metrics that run CAMBI, whether standalone or embedded in a VMAF v1 model.
+fn wants_cambi(metrics: &BTreeSet<MetricId>) -> bool {
+    metrics.contains(&MetricId::Cambi) || metrics.contains(&MetricId::VmafV1Cambi)
+}
+
+/// Metrics that need a VMAF v1 model chosen for them.
+fn wants_vmaf_v1_model(metrics: &BTreeSet<MetricId>) -> bool {
+    metrics.contains(&MetricId::Vmaf) || metrics.contains(&MetricId::VmafV1Cambi)
+}
+
+/// Detects a CAMBI measurement running against a scaled encode, and builds the
+/// correction that tells CAMBI the encode's true, pre-scale size.
+///
+/// CAMBI reads banding from the coded picture. An encode already scaled up to match
+/// the reference hides its own banding pattern unless CAMBI is told the real size it
+/// was coded at. This only fires once the resolution correction has already fired,
+/// since only then was the encode actually scaled.
+pub fn detect_cambi_encode_size(
+    metrics: &BTreeSet<MetricId>,
+    resolution: Option<&Correction>,
+    encode: &MediaInfo,
+    target_label: &str,
+) -> Option<Correction> {
+    if !wants_cambi(metrics) {
+        return None;
+    }
+    let CorrectionDetail::Resolution {
+        pre_scale_width,
+        pre_scale_height,
+    } = resolution?.detail
+    else {
+        return None;
+    };
+    Some(Correction {
+        id: CorrectionId::CambiEncodeSize,
+        target_label: target_label.to_string(),
+        message: format!(
+            "{target_label}: CAMBI measured the true encode size, {pre_scale_width}x{pre_scale_height} at {} bit, from before the scale to the reference.",
+            encode.bit_depth
+        ),
+        detail: CorrectionDetail::CambiEncodeSize {
+            width: pre_scale_width,
+            height: pre_scale_height,
+            bit_depth: encode.bit_depth,
+        },
+    })
+}
+
+/// Detects a VMAF v1 measurement, and chooses the model for it.
+///
+/// The measurement resolution is the reference's own resolution, since the encode is
+/// always scaled up to match it. The tool never lets a v1 model be chosen by matching
+/// its file name. `models` must already hold only the models for the reference's
+/// frame rate bracket, since the standard and the high-frame-rate models live in two
+/// separate folders with no field of their own to tell them apart.
+pub fn detect_vmaf_model(
+    metrics: &BTreeSet<MetricId>,
+    models: &[VmafModel],
+    reference: &MediaInfo,
+    viewing_distance: f32,
+    target_label: &str,
+) -> Option<Correction> {
+    if !wants_vmaf_v1_model(metrics) {
+        return None;
+    }
+    let chosen = vmaf_model::choose_model(models, reference.height, viewing_distance)?;
+    let file_name = chosen
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    Some(Correction {
+        id: CorrectionId::VmafModel,
+        target_label: target_label.to_string(),
+        message: format!(
+            "{target_label}: chose {file_name} for {} fps at {}p. Viewing distance {:.1}, reference display height {}.",
+            reference.frame_rate.label(),
+            reference.height,
+            chosen.normalized_viewing_distance,
+            chosen.reference_display_height
+        ),
+        detail: CorrectionDetail::VmafModel {
+            path: chosen.path.clone(),
+        },
+    })
+}
+
 /// Detects a color range flag that disagrees with the real pixel data.
 ///
 /// A file flagged full range with every sampled luma value inside the limited-range
@@ -282,19 +383,39 @@ impl DetectedCorrections {
 /// Runs every detector for one reference and encode pair.
 ///
 /// The planner and the interface both call this one function, so they can never
-/// disagree about what fired.
+/// disagree about what fired. `metrics` is the set that will actually run, since C4
+/// and C5 only matter when a CAMBI or a VMAF v1 metric is ticked. `vmaf_models` must
+/// already hold only the models for the reference's frame rate bracket.
 pub fn detect_all(
     reference: &MediaInfo,
     encode: &MediaInfo,
     target_label: &str,
     sample: Option<LumaExtremes>,
+    metrics: &BTreeSet<MetricId>,
+    vmaf_models: &[VmafModel],
+    vmaf_viewing_distance: f32,
 ) -> DetectedCorrections {
     let mut result = DetectedCorrections::default();
 
     if let Some(correction) = detect_color_range(reference, encode, target_label) {
         result.corrections.push(correction);
     }
-    if let Some(correction) = detect_resolution(reference, encode, target_label) {
+    let resolution = detect_resolution(reference, encode, target_label);
+    if let Some(correction) =
+        detect_cambi_encode_size(metrics, resolution.as_ref(), encode, target_label)
+    {
+        result.corrections.push(correction);
+    }
+    if let Some(correction) = resolution {
+        result.corrections.push(correction);
+    }
+    if let Some(correction) = detect_vmaf_model(
+        metrics,
+        vmaf_models,
+        reference,
+        vmaf_viewing_distance,
+        target_label,
+    ) {
         result.corrections.push(correction);
     }
 
@@ -368,7 +489,15 @@ mod tests {
                 .is_none()
         );
 
-        let detected = detect_all(&reference, &encode, "encode.mp4", None);
+        let detected = detect_all(
+            &reference,
+            &encode,
+            "encode.mp4",
+            None,
+            &BTreeSet::new(),
+            &[],
+            3.0,
+        );
         assert!(detected.corrections.is_empty());
         assert!(detected.notes.is_empty());
     }
@@ -489,7 +618,15 @@ mod tests {
     fn display_lines_names_the_category_for_a_correction_and_not_for_a_note() {
         let reference = media_info(1920, 1080, ColorRange::Tv, "yuv420p", "h264", 150);
         let encode = media_info(1920, 1080, ColorRange::Pc, "yuv420p", "h264", 150);
-        let detected = detect_all(&reference, &encode, "encode.mp4", None);
+        let detected = detect_all(
+            &reference,
+            &encode,
+            "encode.mp4",
+            None,
+            &BTreeSet::new(),
+            &[],
+            3.0,
+        );
 
         let lines = detected.display_lines();
         assert_eq!(lines.len(), 1);
@@ -500,7 +637,15 @@ mod tests {
     fn display_lines_puts_every_correction_before_every_note() {
         let reference = media_info(1920, 1080, ColorRange::Tv, "yuv420p", "prores", 150);
         let encode = media_info(3840, 2160, ColorRange::Pc, "yuv420p", "h264", 150);
-        let detected = detect_all(&reference, &encode, "encode.mp4", None);
+        let detected = detect_all(
+            &reference,
+            &encode,
+            "encode.mp4",
+            None,
+            &BTreeSet::new(),
+            &[],
+            3.0,
+        );
 
         let lines = detected.display_lines();
         assert_eq!(lines.len(), 3);

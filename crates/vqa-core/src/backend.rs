@@ -1,6 +1,7 @@
 use crate::capability::LaneKind;
 use crate::media::MediaInfo;
 use crate::metric::MetricId;
+use crate::vmaf_model::VmafModel;
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -17,6 +18,11 @@ pub struct MeasureJob {
     pub frame_range: Option<(u64, u64)>,
     pub fused_passes: bool,
     pub work_dir: PathBuf,
+    /// Every VMAF model available for the reference's frame rate bracket, already
+    /// filtered to the standard or the high-frame-rate folder.
+    pub vmaf_models: Vec<VmafModel>,
+    /// The VMAF viewing distance, in picture heights, that chooses among those models.
+    pub vmaf_viewing_distance: f32,
 }
 
 pub struct Invocation {

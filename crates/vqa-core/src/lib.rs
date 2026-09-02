@@ -15,6 +15,7 @@ pub mod pooling;
 pub mod preset;
 pub mod probe;
 pub mod set;
+pub mod vmaf_model;
 
 pub use backend::{
     BufferSink, ExitReport, FrameSink, Invocation, JobInput, LogArtifact, LogFormat, MeasureJob,
