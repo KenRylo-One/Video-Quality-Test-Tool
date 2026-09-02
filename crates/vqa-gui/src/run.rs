@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use vqa_backends::ffmpeg;
 use vqa_core::backend::{JobInput, MeasureJob};
+use vqa_core::corrections;
 use vqa_core::metric::MetricId;
 use vqa_core::pooling::Pooled;
 use vqa_core::set::FileId;
@@ -13,6 +14,8 @@ pub struct RunState {
     encodes_remaining: usize,
     pub results: HashMap<(FileId, MetricId), Pooled>,
     pub failures: Vec<String>,
+    /// Every correction and note for this run, as one flat, ready-to-show list.
+    pub notes: Vec<String>,
 }
 
 impl RunState {
@@ -42,6 +45,8 @@ impl RunState {
             .join(run_id.to_string());
 
         let mut work = Vec::new();
+        let mut notes = Vec::new();
+
         for encode in session.files.encodes() {
             let encode_work_dir = work_dir.join(encode.id.0.to_string());
             std::fs::create_dir_all(&encode_work_dir).ok()?;
@@ -65,6 +70,12 @@ impl RunState {
             if invocations.is_empty() {
                 continue;
             }
+
+            let sample = session.luma_extremes(&encode.info.path);
+            let detected =
+                corrections::detect_all(&reference.info, &encode.info, &encode.label, sample);
+            notes.extend(detected.display_lines());
+
             work.push(EncodeWork {
                 encode: encode.id,
                 invocations,
@@ -73,6 +84,10 @@ impl RunState {
 
         if work.is_empty() {
             return None;
+        }
+
+        for note in corrections::known_metric_fault_notes(&metrics) {
+            notes.push(note.message);
         }
 
         let encodes_remaining = work.len();
@@ -90,6 +105,7 @@ impl RunState {
             encodes_remaining,
             results: HashMap::new(),
             failures: Vec::new(),
+            notes,
         })
     }
 
@@ -129,6 +145,7 @@ impl RunState {
             encodes_remaining,
             results: HashMap::new(),
             failures: Vec::new(),
+            notes: Vec::new(),
         }
     }
 }
@@ -193,5 +210,50 @@ mod tests {
 
         assert!(!state.poll());
         assert_eq!(state.failures.len(), 1);
+    }
+
+    /// A real `Session`, real files, and a real `RunState`. Skips, and does not fail,
+    /// when this machine has neither `ffmpeg` nor the test media.
+    #[test]
+    fn a_real_run_reports_the_color_range_note() {
+        let media_folder =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Test-Media");
+        let reference_path = media_folder.join("TEST_B_limited_range_flagged_tv.mp4");
+        let encode_path = media_folder.join("TEST_A_full_range_flagged_pc.mp4");
+        if !reference_path.is_file() || !encode_path.is_file() {
+            return;
+        }
+
+        let mut session = vqa_run::Session::with_settings(
+            vqa_run::Settings::default(),
+            vqa_run::CapabilityCache::new(),
+        );
+        if !session.inventory.has(vqa_core::BinaryId::Ffmpeg)
+            || !session.inventory.has(vqa_core::BinaryId::Ffprobe)
+        {
+            return;
+        }
+
+        session.add_file(&reference_path);
+        session.add_file(&encode_path);
+        session.toggle_metric(MetricId::PsnrY, true);
+
+        let Some(mut state) = RunState::start(&session) else {
+            panic!("a reference, an encode, and a runnable metric are all present");
+        };
+
+        assert!(
+            state
+                .notes
+                .iter()
+                .any(|line| line.starts_with("Color range:")),
+            "TEST_A against TEST_B must name the color range correction"
+        );
+
+        let encode_id = session.files.encodes().next().unwrap().id;
+        while state.poll() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(state.results.contains_key(&(encode_id, MetricId::PsnrY)));
     }
 }
