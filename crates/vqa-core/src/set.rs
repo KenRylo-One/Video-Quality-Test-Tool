@@ -3,7 +3,7 @@
 //! Every encode is measured against the same reference. The tool holds no idea of where a
 //! file came from. A file that you pulled with `yt-dlp` is just another encode.
 
-use crate::media::{ColorRange, MediaInfo};
+use crate::media::MediaInfo;
 use crate::palette::SERIES_SLOTS;
 use std::collections::BTreeMap;
 
@@ -178,13 +178,13 @@ impl ComparisonSet {
             return DiffMarks::default();
         }
         DiffMarks {
-            resolution: reference.info.width != file.info.width
-                || reference.info.height != file.info.height,
-            color_range: effective_range(&reference.info) != effective_range(&file.info),
-            frame_count: match (reference.info.frame_count(), file.info.frame_count()) {
-                (Some(left), Some(right)) => left != right,
-                _ => false,
-            },
+            resolution: crate::corrections::detect_resolution(&reference.info, &file.info, "")
+                .is_some(),
+            color_range: crate::corrections::detect_color_range(&reference.info, &file.info, "")
+                .is_some(),
+            frame_count: crate::corrections::detect_frame_count(&reference.info, &file.info, "")
+                .correction
+                .is_some(),
         }
     }
 
@@ -200,21 +200,10 @@ impl ComparisonSet {
     }
 }
 
-/// The color range that the pixel data really has.
-///
-/// A `yuvj` pixel format is full range whatever the flag says.
-fn effective_range(info: &MediaInfo) -> ColorRange {
-    if info.pix_fmt_is_full_range() {
-        ColorRange::Pc
-    } else {
-        info.color_range
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::Rational;
+    use crate::media::{ColorRange, Rational};
     use std::path::PathBuf;
 
     fn file(name: &str, width: u32, height: u32, range: ColorRange, pix_fmt: &str) -> MediaInfo {

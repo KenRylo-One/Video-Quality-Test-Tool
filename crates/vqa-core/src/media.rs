@@ -252,6 +252,17 @@ impl MediaInfo {
     pub fn pix_fmt_is_full_range(&self) -> bool {
         pix_fmt_is_full_range(&self.pix_fmt)
     }
+
+    /// The color range that the pixel data really has.
+    ///
+    /// A `yuvj` pixel format is full range whatever the flag says.
+    pub fn effective_color_range(&self) -> ColorRange {
+        if self.pix_fmt_is_full_range() {
+            ColorRange::Pc
+        } else {
+            self.color_range
+        }
+    }
 }
 
 /// The real luma minimum and maximum of a sample of frames.

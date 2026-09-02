@@ -5,6 +5,7 @@
 
 pub mod backend;
 pub mod capability;
+pub mod corrections;
 pub mod error;
 pub mod estimate;
 pub mod media;
@@ -20,6 +21,9 @@ pub use backend::{
     ProcessRunner, Progress,
 };
 pub use capability::{BinaryCapabilities, BinaryId, FoundBinary, Inventory, LaneKind, Requirement};
+pub use corrections::{
+    Correction, CorrectionDetail, CorrectionId, DetectedCorrections, Note, NoteId, detect_all,
+};
 pub use error::{CoreError, Result};
 pub use estimate::RunEstimate;
 pub use media::{ColorRange, Fingerprint, FrameSample, LumaExtremes, MediaInfo, Rational};
