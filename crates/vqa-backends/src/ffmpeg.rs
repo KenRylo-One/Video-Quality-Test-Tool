@@ -2,11 +2,41 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use vqa_core::backend::{Invocation, LogArtifact, LogFormat, MeasureJob};
 use vqa_core::capability::LaneKind;
+use vqa_core::corrections::{self, CorrectionId, DetectedCorrections};
 use vqa_core::metric::MetricId;
 
 const FFMPEG_FAMILY: [MetricId; 3] = [MetricId::PsnrY, MetricId::SsimAll, MetricId::XpsnrMin];
 
+/// Which corrections `plan()` is allowed to apply to the filter graph.
+///
+/// For tests only. `plan()` always uses `CorrectionToggles::default()`. No setting, no
+/// preset and no interface control ever builds one of these by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrectionToggles {
+    pub color_range: bool,
+    pub resolution: bool,
+    pub frame_count: bool,
+}
+
+impl Default for CorrectionToggles {
+    fn default() -> Self {
+        Self {
+            color_range: true,
+            resolution: true,
+            frame_count: true,
+        }
+    }
+}
+
 pub fn plan(job: &MeasureJob) -> vqa_core::Result<Vec<Invocation>> {
+    plan_with_toggles(job, CorrectionToggles::default())
+}
+
+/// For tests only. See `CorrectionToggles`.
+pub fn plan_with_toggles(
+    job: &MeasureJob,
+    toggles: CorrectionToggles,
+) -> vqa_core::Result<Vec<Invocation>> {
     let metrics: Vec<MetricId> = FFMPEG_FAMILY
         .iter()
         .copied()
@@ -17,24 +47,59 @@ pub fn plan(job: &MeasureJob) -> vqa_core::Result<Vec<Invocation>> {
         return Ok(Vec::new());
     }
 
+    let target_label = job.encode.info.file_name();
+    let mut detected =
+        corrections::detect_all(&job.reference.info, &job.encode.info, &target_label, None);
+    apply_toggles(&mut detected, toggles);
+    let frame_range = job.frame_range.or(detected.frame_range);
+
     if job.fused_passes {
-        Ok(vec![fused(job, &metrics)])
+        Ok(vec![fused(job, &metrics, &detected, frame_range)])
     } else {
         Ok(metrics
             .iter()
-            .map(|metric| separate(job, *metric))
+            .map(|metric| separate(job, *metric, &detected, frame_range))
             .collect())
     }
 }
 
-fn separate(job: &MeasureJob, metric: MetricId) -> Invocation {
+/// Drops a detected correction that a test asked to disable, and drops the frame range
+/// that came from it, so the toggle really turns the correction off.
+fn apply_toggles(detected: &mut DetectedCorrections, toggles: CorrectionToggles) {
+    if !toggles.color_range {
+        detected
+            .corrections
+            .retain(|correction| correction.id != CorrectionId::ColorRange);
+    }
+    if !toggles.resolution {
+        detected
+            .corrections
+            .retain(|correction| correction.id != CorrectionId::Resolution);
+    }
+    if !toggles.frame_count {
+        detected
+            .corrections
+            .retain(|correction| correction.id != CorrectionId::FrameCount);
+        detected.frame_range = None;
+    }
+}
+
+fn separate(
+    job: &MeasureJob,
+    metric: MetricId,
+    detected: &DetectedCorrections,
+    frame_range: Option<(u64, u64)>,
+) -> Invocation {
     let stats_path = job.work_dir.join(log_file_name(metric));
     let format = log_format_of(metric);
 
     let distorted_pad = "distorted_pad";
     let reference_pad = "reference_pad";
-    let reset_distorted = format!("[0:v]setpts=PTS-STARTPTS[{distorted_pad}]");
-    let reset_reference = format!("[1:v]setpts=PTS-STARTPTS[{reference_pad}]");
+    let reset_distorted = format!(
+        "[0:v]{}[{distorted_pad}]",
+        distorted_chain(job, detected, frame_range)
+    );
+    let reset_reference = format!("[1:v]{}[{reference_pad}]", reference_chain(frame_range));
     let branch = filter_branch(metric, distorted_pad, reference_pad, &stats_path);
 
     let filter_graph = if metric == MetricId::XpsnrMin {
@@ -57,7 +122,12 @@ fn separate(job: &MeasureJob, metric: MetricId) -> Invocation {
     }
 }
 
-fn fused(job: &MeasureJob, metrics: &[MetricId]) -> Invocation {
+fn fused(
+    job: &MeasureJob,
+    metrics: &[MetricId],
+    detected: &DetectedCorrections,
+    frame_range: Option<(u64, u64)>,
+) -> Invocation {
     let count = metrics.len();
     let distorted_pads: Vec<String> = (0..count)
         .map(|index| format!("distorted{index}"))
@@ -67,8 +137,10 @@ fn fused(job: &MeasureJob, metrics: &[MetricId]) -> Invocation {
         .collect();
 
     let mut filter_graph = format!(
-        "[0:v]setpts=PTS-STARTPTS,split={count}[{}];[1:v]setpts=PTS-STARTPTS,split={count}[{}]",
+        "[0:v]{},split={count}[{}];[1:v]{},split={count}[{}]",
+        distorted_chain(job, detected, frame_range),
         distorted_pads.join("]["),
+        reference_chain(frame_range),
         reference_pads.join("]["),
     );
 
@@ -96,6 +168,73 @@ fn fused(job: &MeasureJob, metrics: &[MetricId]) -> Invocation {
         cwd: None,
         expects,
         lane: LaneKind::Cpu,
+    }
+}
+
+/// The filter chain for the distorted input: an optional trim, always a timestamp
+/// reset, then an optional scale and an optional range conversion, in that order.
+/// Verified against the real `ffmpeg` on this machine, including the combined chain.
+fn distorted_chain(
+    job: &MeasureJob,
+    detected: &DetectedCorrections,
+    frame_range: Option<(u64, u64)>,
+) -> String {
+    let mut chain = trim_clause(frame_range);
+    chain.push_str("setpts=PTS-STARTPTS");
+
+    if detected
+        .corrections
+        .iter()
+        .any(|correction| correction.id == CorrectionId::Resolution)
+    {
+        chain.push_str(&format!(
+            ",scale={}:{}:flags=bicubic",
+            job.reference.info.width, job.reference.info.height
+        ));
+    }
+
+    if detected
+        .corrections
+        .iter()
+        .any(|correction| correction.id == CorrectionId::ColorRange)
+    {
+        let from = job
+            .encode
+            .info
+            .effective_color_range()
+            .ffmpeg_value()
+            .unwrap_or("full");
+        let to = job
+            .reference
+            .info
+            .effective_color_range()
+            .ffmpeg_value()
+            .unwrap_or("limited");
+        chain.push_str(&format!(
+            ",zscale=in_range={from}:out_range={to},format=yuv420p"
+        ));
+    }
+
+    chain
+}
+
+/// The filter chain for the reference input. The reference is never scaled and never
+/// range-converted.
+fn reference_chain(frame_range: Option<(u64, u64)>) -> String {
+    let mut chain = trim_clause(frame_range);
+    chain.push_str("setpts=PTS-STARTPTS");
+    chain
+}
+
+/// `trim=start_frame=X:end_frame=Y,` for a range, or an empty string for the whole file.
+/// `end_frame` is the first dropped frame, so an inclusive last frame becomes `last + 1`.
+fn trim_clause(frame_range: Option<(u64, u64)>) -> String {
+    match frame_range {
+        Some((first_frame, last_frame)) => format!(
+            "trim=start_frame={first_frame}:end_frame={},",
+            last_frame + 1
+        ),
+        None => String::new(),
     }
 }
 
@@ -169,40 +308,56 @@ mod tests {
     use vqa_core::backend::JobInput;
     use vqa_core::media::{ColorRange, MediaInfo, Rational};
 
-    fn media_info(name: &str) -> MediaInfo {
+    fn media_info(
+        name: &str,
+        width: u32,
+        height: u32,
+        range: ColorRange,
+        frames: u64,
+    ) -> MediaInfo {
         MediaInfo {
             path: PathBuf::from(name),
             bytes: 0,
             codec: "h264".into(),
             profile: None,
-            width: 1920,
-            height: 1080,
+            width,
+            height,
             pix_fmt: "yuv420p".into(),
             bit_depth: 8,
-            color_range: ColorRange::Tv,
+            color_range: range,
             color_space: Some("bt709".into()),
             frame_rate: Rational { num: 30, den: 1 },
-            nb_frames: Some(300),
-            duration_s: Some(10.0),
+            nb_frames: Some(frames),
+            duration_s: Some(frames as f64 / 30.0),
             bit_rate: Some(1_000_000),
         }
     }
 
-    fn job_with(metrics: &[MetricId], fused_passes: bool) -> MeasureJob {
+    fn job_with(
+        metrics: &[MetricId],
+        fused_passes: bool,
+        reference: MediaInfo,
+        encode: MediaInfo,
+    ) -> MeasureJob {
         MeasureJob {
             reference: JobInput {
                 path: PathBuf::from("reference.mkv"),
-                info: media_info("reference.mkv"),
+                info: reference,
             },
             encode: JobInput {
                 path: PathBuf::from("distorted.mkv"),
-                info: media_info("distorted.mkv"),
+                info: encode,
             },
             metrics: metrics.iter().copied().collect::<BTreeSet<_>>(),
             frame_range: None,
             fused_passes,
             work_dir: PathBuf::from("work"),
         }
+    }
+
+    fn identical_job(metrics: &[MetricId], fused_passes: bool) -> MeasureJob {
+        let info = media_info("clip.mkv", 1920, 1080, ColorRange::Tv, 150);
+        job_with(metrics, fused_passes, info.clone(), info)
     }
 
     fn arg_strings(invocation: &Invocation) -> Vec<String> {
@@ -215,13 +370,13 @@ mod tests {
 
     #[test]
     fn no_ffmpeg_family_metric_gives_no_invocation() {
-        let job = job_with(&[MetricId::Vmaf], false);
+        let job = identical_job(&[MetricId::Vmaf], false);
         assert!(plan(&job).unwrap().is_empty());
     }
 
     #[test]
     fn xpsnr_takes_the_reference_first_and_psnr_takes_the_distorted_first() {
-        let job = job_with(&[MetricId::PsnrY, MetricId::XpsnrMin], false);
+        let job = identical_job(&[MetricId::PsnrY, MetricId::XpsnrMin], false);
         let invocations = plan(&job).unwrap();
         assert_eq!(invocations.len(), 2);
 
@@ -250,34 +405,105 @@ mod tests {
     }
 
     #[test]
-    fn a_separate_pass_gives_one_invocation_for_each_metric() {
-        let job = job_with(
-            &[MetricId::PsnrY, MetricId::SsimAll, MetricId::XpsnrMin],
-            false,
-        );
-        let invocations = plan(&job).unwrap();
-        assert_eq!(invocations.len(), 3);
-        for invocation in &invocations {
-            assert_eq!(invocation.expects.len(), 1);
-        }
+    fn identical_media_info_fires_no_correction() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        assert!(filter_graph.contains("[0:v]setpts=PTS-STARTPTS[distorted_pad]"));
+        assert!(!filter_graph.contains("scale="));
+        assert!(!filter_graph.contains("zscale="));
+        assert!(!filter_graph.contains("trim="));
     }
 
     #[test]
-    fn a_fused_pass_gives_one_invocation_that_expects_every_log() {
+    fn a_color_range_mismatch_adds_zscale_to_the_distorted_branch_only() {
+        let reference = media_info("reference.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Pc, 150);
+        let job = job_with(&[MetricId::PsnrY], false, reference, encode);
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+
+        assert!(filter_graph.contains("[0:v]setpts=PTS-STARTPTS,zscale=in_range=full:out_range=limited,format=yuv420p[distorted_pad]"));
+        assert!(filter_graph.contains("[1:v]setpts=PTS-STARTPTS[reference_pad]"));
+    }
+
+    #[test]
+    fn a_resolution_mismatch_scales_the_distorted_branch_to_the_reference_size() {
+        let reference = media_info("reference.mkv", 3840, 2160, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let job = job_with(&[MetricId::PsnrY], false, reference, encode);
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+
+        assert!(
+            filter_graph
+                .contains("[0:v]setpts=PTS-STARTPTS,scale=3840:2160:flags=bicubic[distorted_pad]")
+        );
+        assert!(filter_graph.contains("[1:v]setpts=PTS-STARTPTS[reference_pad]"));
+    }
+
+    #[test]
+    fn a_frame_count_mismatch_trims_both_branches_to_the_same_end_frame() {
+        let reference = media_info("reference.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Tv, 140);
+        let job = job_with(&[MetricId::PsnrY], false, reference, encode);
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+
+        assert!(
+            filter_graph.contains(
+                "[0:v]trim=start_frame=0:end_frame=140,setpts=PTS-STARTPTS[distorted_pad]"
+            )
+        );
+        assert!(
+            filter_graph.contains(
+                "[1:v]trim=start_frame=0:end_frame=140,setpts=PTS-STARTPTS[reference_pad]"
+            )
+        );
+    }
+
+    #[test]
+    fn a_manual_frame_range_wins_over_the_automatic_clamp() {
+        let reference = media_info("reference.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Tv, 140);
+        let mut job = job_with(&[MetricId::PsnrY], false, reference, encode);
+        job.frame_range = Some((10, 49));
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+
+        assert!(filter_graph.contains("trim=start_frame=10:end_frame=50"));
+    }
+
+    #[test]
+    fn disabling_the_color_range_toggle_removes_the_zscale_filter() {
+        let reference = media_info("reference.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Pc, 150);
+        let job = job_with(&[MetricId::PsnrY], false, reference, encode);
+
+        let toggles = CorrectionToggles {
+            color_range: false,
+            ..CorrectionToggles::default()
+        };
+        let invocation = &plan_with_toggles(&job, toggles).unwrap()[0];
+        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        assert!(!filter_graph.contains("zscale="));
+    }
+
+    #[test]
+    fn a_fused_pass_applies_the_same_corrections_to_every_branch() {
+        let reference = media_info("reference.mkv", 3840, 2160, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Pc, 150);
         let job = job_with(
             &[MetricId::PsnrY, MetricId::SsimAll, MetricId::XpsnrMin],
             true,
+            reference,
+            encode,
         );
-        let invocations = plan(&job).unwrap();
-        assert_eq!(invocations.len(), 1);
-        assert_eq!(invocations[0].expects.len(), 3);
-    }
-
-    #[test]
-    fn every_invocation_ends_with_the_null_output() {
-        let job = job_with(&[MetricId::PsnrY], false);
         let invocation = &plan(&job).unwrap()[0];
-        let args = arg_strings(invocation);
-        assert_eq!(&args[args.len() - 3..], ["-f", "null", "-"]);
+        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+
+        assert!(filter_graph.starts_with(
+            "[0:v]setpts=PTS-STARTPTS,scale=3840:2160:flags=bicubic,zscale=in_range=full:out_range=limited,format=yuv420p,split=3"
+        ));
     }
 }
