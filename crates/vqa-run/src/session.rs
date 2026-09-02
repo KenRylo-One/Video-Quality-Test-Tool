@@ -8,7 +8,7 @@ use vqa_backends::ffprobe::FfprobeProbe;
 use vqa_backends::{discovery, hash};
 use vqa_core::capability::{BinaryId, Inventory};
 use vqa_core::estimate::{RunEstimate, estimate};
-use vqa_core::media::{ColorRange, MediaInfo, Rational};
+use vqa_core::media::{ColorRange, FrameSample, LumaExtremes, MediaInfo, Rational};
 use vqa_core::metric::{Availability, MetricId, availability};
 use vqa_core::preset::PRESETS;
 use vqa_core::probe::MediaProbe;
@@ -141,6 +141,16 @@ impl Session {
         self.inventory
             .get(BinaryId::Ffprobe)
             .map(|found| FfprobeProbe::new(found.path.clone()))
+    }
+
+    /// The real luma minimum and maximum of a sample of frames, for note N1.
+    ///
+    /// Returns nothing with no `ffprobe`, or when the read fails. Nothing blocks on
+    /// this, so a failed sample just means the note never fires for this file.
+    pub fn luma_extremes(&self, path: &Path) -> Option<LumaExtremes> {
+        self.probe()?
+            .luma_extremes(path, FrameSample::default())
+            .ok()
     }
 
     /// Adds one file to the comparison set.
