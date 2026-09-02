@@ -8,6 +8,7 @@ pub mod csv_writer;
 pub mod session;
 pub mod settings;
 pub mod supervisor;
+pub mod vmaf_models;
 
 pub use cache::CapabilityCache;
 pub use csv_writer::{MetricColumn, write_frame_csv};

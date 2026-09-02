@@ -44,8 +44,25 @@ impl RunState {
             .join("vqa-run")
             .join(run_id.to_string());
 
+        let vmaf_model_folder =
+            vqa_run::vmaf_models::find_model_folder(session.settings.vmaf_model_folder.as_deref());
+        let vmaf_models = vmaf_model_folder
+            .as_deref()
+            .map(|folder| vqa_run::vmaf_models::load_models_for(folder, reference.info.frame_rate))
+            .unwrap_or_default();
+        let vmaf_viewing_distance = session.settings.vmaf_viewing_distance;
+
         let mut work = Vec::new();
         let mut notes = Vec::new();
+
+        let wants_vmaf_v1 =
+            metrics.contains(&MetricId::Vmaf) || metrics.contains(&MetricId::VmafV1Cambi);
+        if wants_vmaf_v1 && vmaf_models.is_empty() {
+            notes.push(
+                "No VMAF v1 model was found. VMAF v1 and CAMBI in VMAF v1 did not run for this comparison."
+                    .to_string(),
+            );
+        }
 
         for encode in session.files.encodes() {
             let encode_work_dir = work_dir.join(encode.id.0.to_string());
@@ -64,6 +81,8 @@ impl RunState {
                 frame_range,
                 fused_passes: session.settings.fused_passes,
                 work_dir: encode_work_dir,
+                vmaf_models: vmaf_models.clone(),
+                vmaf_viewing_distance,
             };
 
             let invocations = ffmpeg::plan(&job).ok()?;
@@ -72,8 +91,15 @@ impl RunState {
             }
 
             let sample = session.luma_extremes(&encode.info.path);
-            let detected =
-                corrections::detect_all(&reference.info, &encode.info, &encode.label, sample);
+            let detected = corrections::detect_all(
+                &reference.info,
+                &encode.info,
+                &encode.label,
+                sample,
+                &metrics,
+                &vmaf_models,
+                vmaf_viewing_distance,
+            );
             notes.extend(detected.display_lines());
 
             work.push(EncodeWork {
@@ -255,5 +281,55 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(state.results.contains_key(&(encode_id, MetricId::PsnrY)));
+    }
+
+    /// A real run of standalone CAMBI through `RunState`, the same layer the GUI
+    /// calls. CAMBI needs no VMAF model file, so it reaches a result on every machine
+    /// with a `libvmaf`-enabled `ffmpeg`, unlike VMAF v1.
+    #[test]
+    fn a_real_run_measures_cambi_with_no_model_folder_needed() {
+        let media_folder =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Test-Media");
+        let reference_path = media_folder.join("TEST_B_limited_range_flagged_tv.mp4");
+        let encode_path = media_folder.join("TEST_A_full_range_flagged_pc.mp4");
+        if !reference_path.is_file() || !encode_path.is_file() {
+            return;
+        }
+
+        let mut session = vqa_run::Session::with_settings(
+            vqa_run::Settings::default(),
+            vqa_run::CapabilityCache::new(),
+        );
+        if !session.inventory.has(vqa_core::BinaryId::Ffmpeg)
+            || !session.inventory.has(vqa_core::BinaryId::Ffprobe)
+        {
+            return;
+        }
+
+        session.add_file(&reference_path);
+        session.add_file(&encode_path);
+        // Isolate this test to Cambi. `Vmaf` is a default tick too, and this machine's
+        // real libvmaf build cannot load a real v1.0.16 model, which is a separate,
+        // already-known environment gap and not what this test checks.
+        session.selection.metrics.clear();
+        session.toggle_metric(MetricId::Cambi, true);
+        if session.runnable_metrics().is_empty() {
+            return;
+        }
+
+        let Some(mut state) = RunState::start(&session) else {
+            panic!("a reference, an encode, and a runnable metric are all present");
+        };
+
+        let encode_id = session.files.encodes().next().unwrap().id;
+        while state.poll() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(state.results.contains_key(&(encode_id, MetricId::Cambi)));
+        assert!(
+            state.failures.is_empty(),
+            "a real Cambi run must not fail: {:?}",
+            state.failures
+        );
     }
 }

@@ -269,19 +269,34 @@ fn general(ui: &mut Ui, tokens: &Tokens, session: &mut Session) -> bool {
                 "FFVship writes the scaled intermediate file here.",
             ),
             ("Export folder", 1, "CSV, JSON and PNG go here."),
+            (
+                "VMAF model folder",
+                2,
+                "Where vmaf_v1.0.16 and vmaf_v1.0.16_hfr live. Leave empty to search the usual places.",
+            ),
         ] {
             ui.label(sans(label, 12.0, tokens.text));
             let mut text = match folder {
                 0 => session.settings.temp_folder.clone(),
-                _ => session.settings.export_folder.clone(),
+                1 => session.settings.export_folder.clone(),
+                _ => session.settings.vmaf_model_folder.clone(),
             }
             .map(|path| path.display().to_string())
             .unwrap_or_default();
 
+            let hint_text = if folder == 2 {
+                match vqa_run::vmaf_models::find_model_folder(None) {
+                    Some(found) => found.display().to_string(),
+                    None => "not found in the usual places".to_string(),
+                }
+            } else {
+                "the folder of the operating system".to_string()
+            };
+
             let field = ui.add(
                 egui::TextEdit::singleline(&mut text)
                     .desired_width(ui.available_width())
-                    .hint_text("the folder of the operating system")
+                    .hint_text(hint_text)
                     .font(egui::FontId::monospace(11.0)),
             );
             if field.on_hover_text(hint).changed() {
@@ -292,7 +307,8 @@ fn general(ui: &mut Ui, tokens: &Tokens, session: &mut Session) -> bool {
                 };
                 match folder {
                     0 => session.settings.temp_folder = value,
-                    _ => session.settings.export_folder = value,
+                    1 => session.settings.export_folder = value,
+                    _ => session.settings.vmaf_model_folder = value,
                 }
                 changed = true;
             }

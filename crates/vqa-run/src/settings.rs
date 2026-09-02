@@ -75,6 +75,11 @@ pub struct Settings {
     /// Where CSV, JSON and PNG go.
     #[serde(default)]
     pub export_folder: Option<PathBuf>,
+
+    /// Where the VMAF v1 model files live, when the automatic search did not find
+    /// them or found the wrong ones.
+    #[serde(default)]
+    pub vmaf_model_folder: Option<PathBuf>,
 }
 
 fn default_schema() -> u32 {
@@ -116,6 +121,7 @@ impl Default for Settings {
             fused_passes: true,
             temp_folder: None,
             export_folder: None,
+            vmaf_model_folder: None,
         }
     }
 }
