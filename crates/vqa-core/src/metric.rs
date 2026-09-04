@@ -841,7 +841,10 @@ mod tests {
             .iter()
             .filter(|def| def.direction == Direction::LowerIsBetter)
             .collect();
-        assert!(!low.is_empty(), "the registry holds no low-is-better metric");
+        assert!(
+            !low.is_empty(),
+            "the registry holds no low-is-better metric"
+        );
         assert_eq!(MetricId::Cambi.def().plot_lo, 0.0);
         assert_eq!(MetricId::Cambi.def().plot_hi, 24.0);
     }
