@@ -73,12 +73,16 @@ pub fn parse_stats_file(
     if format == LogFormat::VmafCsv {
         return crate::parse::vmaf_csv::parse_vmaf_csv(reader, metric, sink);
     }
+    if format == LogFormat::VshipJson {
+        return crate::parse::vship_json::parse_vship_json(reader, metric, sink);
+    }
 
     let parse_line: fn(&str) -> Option<(u64, f32)> = match format {
         LogFormat::PsnrStats => parse_psnr_line,
         LogFormat::SsimStats => parse_ssim_line,
         LogFormat::XpsnrStats => parse_xpsnr_line,
         LogFormat::VmafCsv => unreachable!("handled above"),
+        LogFormat::VshipJson => unreachable!("handled above"),
     };
 
     for line in reader.lines() {

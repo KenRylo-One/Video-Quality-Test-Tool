@@ -11,6 +11,7 @@ pub mod ffprobe;
 pub mod hash;
 pub mod parse;
 pub mod vmaf_model;
+pub mod vship;
 
 pub use discovery::{Discovery, discover, find_path, probe_binary};
 pub use error::BackendError;
