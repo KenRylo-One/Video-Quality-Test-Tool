@@ -56,6 +56,11 @@ pub struct Settings {
     #[serde(default = "default_intensity")]
     pub butteraugli_intensity_nits: u32,
 
+    /// FFVship's own `--gpu-threads` count. A low-memory graphics card can run out of
+    /// VRAM at FFVship's own default and needs a lower value here.
+    #[serde(default = "default_vship_gpu_threads")]
+    pub vship_gpu_threads: u32,
+
     /// How many measurements can run at once on the processor.
     #[serde(default = "default_cpu_permits")]
     pub cpu_lane_permits: u32,
@@ -91,6 +96,10 @@ fn default_viewing_distance() -> f32 {
 fn default_intensity() -> u32 {
     203
 }
+/// FFVship's own `--help` names this as its recommended value.
+fn default_vship_gpu_threads() -> u32 {
+    3
+}
 fn default_true() -> bool {
     true
 }
@@ -116,6 +125,7 @@ impl Default for Settings {
             binary_paths: BTreeMap::new(),
             vmaf_viewing_distance: default_viewing_distance(),
             butteraugli_intensity_nits: default_intensity(),
+            vship_gpu_threads: default_vship_gpu_threads(),
             cpu_lane_permits: default_cpu_permits(),
             gpu_lane_permits: default_gpu_permits(),
             fused_passes: true,
@@ -211,6 +221,7 @@ mod tests {
         assert_eq!(settings.theme, ThemeChoice::Dark);
         assert_eq!(settings.vmaf_viewing_distance, 3.0);
         assert_eq!(settings.butteraugli_intensity_nits, 203);
+        assert_eq!(settings.vship_gpu_threads, 3);
         assert_eq!(settings.gpu_lane_permits, 1);
         assert!(settings.cpu_lane_permits >= 1);
         assert!(settings.fused_passes);
