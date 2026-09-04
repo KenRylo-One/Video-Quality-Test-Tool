@@ -54,13 +54,19 @@ pub fn probe_args(path: &Path) -> Vec<OsString> {
 
 /// Escapes a path for use inside a `lavfi` filter graph.
 ///
-/// A Windows path holds a drive colon, and a colon separates filter options. Escaping
-/// every special character keeps one code path for three operating systems.
+/// A Windows path holds a drive colon, and a colon separates filter options, so the path
+/// separator is turned around first to keep only one character needing escape. That
+/// colon still needs two backslashes and not one: the filtergraph's option-list scanner
+/// consumes the first level, and the value parser underneath consumes the second.
+/// Verified against a real `ffprobe -f lavfi movie=...,signalstats` invocation, since the
+/// ffmpeg documentation states one level for every special character alike.
 pub fn escape_lavfi(path: &Path) -> String {
-    let text = path.to_string_lossy();
+    let text = path.to_string_lossy().replace('\\', "/");
     let mut escaped = String::with_capacity(text.len() + 8);
     for character in text.chars() {
-        if matches!(character, '\\' | ':' | ',' | '\'' | '[' | ']' | ';' | '=') {
+        if character == ':' {
+            escaped.push_str("\\\\");
+        } else if matches!(character, ',' | '\'' | '[' | ']' | ';' | '=') {
             escaped.push('\\');
         }
         escaped.push(character);
@@ -334,10 +340,10 @@ mod tests {
     }
 
     #[test]
-    fn a_windows_path_needs_no_second_level_of_escaping() {
+    fn a_windows_drive_colon_needs_a_second_level_of_escaping() {
         assert_eq!(
             escape_lavfi(Path::new(r"D:\clips\a b.mp4")),
-            r"D\:\\clips\\a b.mp4"
+            r"D\\:/clips/a b.mp4"
         );
         assert_eq!(
             escape_lavfi(Path::new("/clips/a,b.mp4")),

@@ -1,8 +1,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use vqa_core::backend::{Invocation, LogArtifact, LogFormat, MeasureJob};
-use vqa_core::capability::LaneKind;
+use vqa_core::capability::{BinaryId, LaneKind};
 use vqa_core::corrections::{self, CorrectionDetail, CorrectionId, DetectedCorrections};
+use vqa_core::media::Rational;
 use vqa_core::metric::MetricId;
 
 const FFMPEG_FAMILY: [MetricId; 3] = [MetricId::PsnrY, MetricId::SsimAll, MetricId::XpsnrMin];
@@ -94,14 +95,28 @@ pub fn plan_with_toggles(
     let mut invocations = Vec::new();
 
     if !metrics.is_empty() {
-        if job.fused_passes {
-            invocations.push(fused(job, &metrics, &detected, frame_range));
-        } else {
-            invocations.extend(
-                metrics
-                    .iter()
-                    .map(|metric| separate(job, *metric, &detected, frame_range)),
-            );
+        // The real `xpsnr` filter divides by zero when its input arrives through a
+        // `split` copy instead of straight off the correction chain, verified against
+        // a real ffmpeg build. `xpsnr` never rides in the fused, `split`-based pass.
+        let fusable: Vec<MetricId> = metrics
+            .iter()
+            .copied()
+            .filter(|metric| *metric != MetricId::XpsnrMin)
+            .collect();
+
+        if !fusable.is_empty() {
+            if job.fused_passes {
+                invocations.push(fused(job, &fusable, &detected, frame_range));
+            } else {
+                invocations.extend(
+                    fusable
+                        .iter()
+                        .map(|metric| separate(job, *metric, &detected, frame_range)),
+                );
+            }
+        }
+        if metrics.contains(&MetricId::XpsnrMin) {
+            invocations.push(separate(job, MetricId::XpsnrMin, &detected, frame_range));
         }
     }
 
@@ -147,11 +162,20 @@ fn separate(
 
     let distorted_pad = "distorted_pad";
     let reference_pad = "reference_pad";
-    let reset_distorted = format!(
-        "[0:v]{}[{distorted_pad}]",
-        distorted_chain(job, detected, frame_range)
-    );
-    let reset_reference = format!("[1:v]{}[{reference_pad}]", reference_chain(frame_range));
+    let mut distorted = distorted_chain(job, detected, frame_range);
+    let mut reference = reference_chain(frame_range);
+    if metric == MetricId::XpsnrMin {
+        // The real `setpts` filter does not carry the frame rate onto its output link
+        // on this ffmpeg build, and `xpsnr` divides by that frame rate during its own
+        // init, crashing with SIGFPE. An `fps` filter placed right after `setpts` puts
+        // a concrete rate back on the link. Verified against the real binary: for a
+        // constant frame rate input that already matches, `fps` here changes no frame
+        // count. A variable frame rate input has not been verified against this fix.
+        distorted.push_str(&xpsnr_frame_rate_clause(job.encode.info.frame_rate));
+        reference.push_str(&xpsnr_frame_rate_clause(job.reference.info.frame_rate));
+    }
+    let reset_distorted = format!("[0:v]{distorted}[{distorted_pad}]");
+    let reset_reference = format!("[1:v]{reference}[{reference_pad}]");
     let branch = filter_branch(metric, distorted_pad, reference_pad, &stats_path);
 
     let filter_graph = if metric == MetricId::XpsnrMin {
@@ -171,6 +195,7 @@ fn separate(
             metrics: vec![metric],
         }],
         lane: LaneKind::Cpu,
+        binary: BinaryId::Ffmpeg,
     }
 }
 
@@ -220,6 +245,7 @@ fn fused(
         cwd: None,
         expects,
         lane: LaneKind::Cpu,
+        binary: BinaryId::Ffmpeg,
     }
 }
 
@@ -409,7 +435,7 @@ fn libvmaf_pass(
         "[0:v]{}{bit_depth_clause}[{distorted_pad}];[1:v]{}{bit_depth_clause}[{reference_pad}];[{distorted_pad}][{reference_pad}]libvmaf=log_fmt=csv:log_path={}{model_option}{cambi_size_option}{extra_feature_option}",
         distorted_chain(job, detected, frame_range),
         reference_chain(frame_range),
-        stats_path.to_string_lossy(),
+        escape_filter_path(&stats_path),
     );
 
     let mut metrics: Vec<MetricId> = primary.to_vec();
@@ -426,6 +452,7 @@ fn libvmaf_pass(
             metrics,
         }],
         lane: LaneKind::Cpu,
+        binary: BinaryId::Ffmpeg,
     })
 }
 
@@ -484,6 +511,16 @@ fn reference_chain(frame_range: Option<(u64, u64)>) -> String {
     chain
 }
 
+/// `,fps=num/den` to put a concrete frame rate back on an `xpsnr` branch after
+/// `setpts`, or an empty string when the probe read no usable rate.
+fn xpsnr_frame_rate_clause(rate: Rational) -> String {
+    if rate.num == 0 || rate.den == 0 {
+        String::new()
+    } else {
+        format!(",fps={}/{}", rate.num, rate.den)
+    }
+}
+
 /// `trim=start_frame=X:end_frame=Y,` for a range, or an empty string for the whole file.
 /// `end_frame` is the first dropped frame, so an inclusive last frame becomes `last + 1`.
 fn trim_clause(frame_range: Option<(u64, u64)>) -> String {
@@ -496,6 +533,17 @@ fn trim_clause(frame_range: Option<(u64, u64)>) -> String {
     }
 }
 
+/// A path, ready to sit inside an ffmpeg filter option value. A colon separates one
+/// filter option from the next, so a Windows drive letter needs its colon escaped, and
+/// it needs two backslashes: the option-list scanner consumes one level of escaping and
+/// the value parser underneath consumes a second. Verified against a real `ffmpeg -lavfi
+/// psnr=stats_file=...` invocation, since the ffmpeg documentation states one level.
+fn escape_filter_path(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .replace(':', "\\\\:")
+}
+
 fn filter_branch(
     metric: MetricId,
     distorted_pad: &str,
@@ -503,7 +551,7 @@ fn filter_branch(
     stats_path: &std::path::Path,
 ) -> String {
     let filter_name = ffmpeg_filter_name(metric);
-    let stats_path = stats_path.to_string_lossy();
+    let stats_path = escape_filter_path(stats_path);
     if metric == MetricId::XpsnrMin {
         format!("[{reference_pad}][{distorted_pad}]{filter_name}=stats_file={stats_path}")
     } else {
@@ -612,6 +660,8 @@ mod tests {
             work_dir: PathBuf::from("work"),
             vmaf_models: Vec::new(),
             vmaf_viewing_distance: 3.0,
+            butteraugli_intensity_nits: 203,
+            vship_gpu_threads: 3,
         }
     }
 
@@ -651,7 +701,7 @@ mod tests {
                 "-i",
                 "reference.mkv",
                 "-lavfi",
-                "[1:v]setpts=PTS-STARTPTS[reference_pad];[0:v]setpts=PTS-STARTPTS[distorted_pad];[reference_pad][distorted_pad]xpsnr=stats_file=work/xpsnr.log",
+                "[1:v]setpts=PTS-STARTPTS,fps=30/1[reference_pad];[0:v]setpts=PTS-STARTPTS,fps=30/1[distorted_pad];[reference_pad][distorted_pad]xpsnr=stats_file=work/xpsnr.log",
                 "-f",
                 "null",
                 "-",
@@ -759,12 +809,20 @@ mod tests {
             reference,
             encode,
         );
-        let invocation = &plan(&job).unwrap()[0];
-        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        let invocations = plan(&job).unwrap();
+        // `xpsnr` never shares the fused, `split`-based pass: the real filter divides
+        // by zero when it reads a frame through a `split` copy. It always gets its own
+        // invocation, so the fused pass here only carries PSNR and SSIM, split=2.
+        assert_eq!(invocations.len(), 2);
+        let filter_graph = arg_strings(&invocations[0]).into_iter().nth(8).unwrap();
 
         assert!(filter_graph.starts_with(
-            "[0:v]setpts=PTS-STARTPTS,scale=3840:2160:flags=bicubic,zscale=in_range=full:out_range=limited,format=yuv420p,split=3"
+            "[0:v]setpts=PTS-STARTPTS,scale=3840:2160:flags=bicubic,zscale=in_range=full:out_range=limited,format=yuv420p,split=2"
         ));
+        assert!(!filter_graph.contains("xpsnr"));
+
+        let xpsnr_graph = arg_strings(&invocations[1]).into_iter().nth(8).unwrap();
+        assert!(xpsnr_graph.contains("xpsnr=stats_file="));
     }
 
     fn v1_model(folder: &str, name: &str) -> vqa_core::vmaf_model::VmafModel {
