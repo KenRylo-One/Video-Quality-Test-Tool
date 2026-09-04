@@ -1,4 +1,4 @@
-use crate::capability::LaneKind;
+use crate::capability::{BinaryId, LaneKind};
 use crate::media::MediaInfo;
 use crate::metric::MetricId;
 use crate::vmaf_model::VmafModel;
@@ -23,6 +23,10 @@ pub struct MeasureJob {
     pub vmaf_models: Vec<VmafModel>,
     /// The VMAF viewing distance, in picture heights, that chooses among those models.
     pub vmaf_viewing_distance: f32,
+    /// The Butteraugli intensity target, in nits.
+    pub butteraugli_intensity_nits: u32,
+    /// FFVship's own `--gpu-threads` count.
+    pub vship_gpu_threads: u32,
 }
 
 pub struct Invocation {
@@ -32,6 +36,10 @@ pub struct Invocation {
     pub cwd: Option<PathBuf>,
     pub expects: Vec<LogArtifact>,
     pub lane: LaneKind,
+    /// Which binary this runs. The caller resolves `program` from this against
+    /// whatever Settings or discovery actually found, since a backend's `plan()`
+    /// cannot know where the user's copy of the binary lives.
+    pub binary: BinaryId,
 }
 
 pub struct LogArtifact {
@@ -46,6 +54,7 @@ pub enum LogFormat {
     SsimStats,
     XpsnrStats,
     VmafCsv,
+    VshipJson,
 }
 
 pub trait FrameSink {
