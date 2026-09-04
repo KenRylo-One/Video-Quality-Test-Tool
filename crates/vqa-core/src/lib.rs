@@ -11,6 +11,7 @@ pub mod estimate;
 pub mod media;
 pub mod metric;
 pub mod palette;
+pub mod plot;
 pub mod pooling;
 pub mod preset;
 pub mod probe;
@@ -34,6 +35,7 @@ pub use metric::{
     REGISTRY, Unit,
 };
 pub use palette::{SeriesColor, Theme};
+pub use plot::{Body, PlotRequest, Scene, SeriesInput, build_scenes};
 pub use pooling::{Pooled, pool};
 pub use preset::{PRESETS, Preset};
 pub use probe::MediaProbe;
