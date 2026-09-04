@@ -1,5 +1,5 @@
 use crate::media::{ColorRange, LumaExtremes, MediaInfo};
-use crate::metric::MetricId;
+use crate::metric::{MetricGroup, MetricId};
 use crate::vmaf_model::{self, VmafModel};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -35,6 +35,8 @@ pub enum NoteId {
     /// a file trimmed at the end from a file trimmed at the start, so it names the
     /// assumption every time it fires.
     FrameCountAlignmentAssumed,
+    /// A Vship metric is ticked, and a correction it needs did not reach it.
+    VshipCorrectionNotApplied,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -440,6 +442,39 @@ pub fn detect_all(
     result
 }
 
+/// Corrections a Vship metric needs but cannot get. FFVship reads the container
+/// itself, with no filter chain in front of it, so only the frame-count clamp reaches
+/// it, through `--start`/`--end`. Fires only when a Vship metric is ticked, and only
+/// for a correction this pair of files actually triggered.
+pub fn detect_vship_gap_notes(
+    metrics: &BTreeSet<MetricId>,
+    corrections: &[Correction],
+) -> Vec<Note> {
+    if !metrics
+        .iter()
+        .any(|id| id.def().group == MetricGroup::Ffvship)
+    {
+        return Vec::new();
+    }
+    corrections
+        .iter()
+        .filter(|correction| {
+            matches!(
+                correction.id,
+                CorrectionId::ColorRange | CorrectionId::Resolution
+            )
+        })
+        .map(|correction| Note {
+            id: NoteId::VshipCorrectionNotApplied,
+            message: format!(
+                "{}: FFVship measured the files as delivered. The {} correction did not reach it.",
+                correction.target_label,
+                correction.id.label().to_ascii_lowercase()
+            ),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,5 +688,62 @@ mod tests {
         assert!(lines[1].starts_with("Resolution:"));
         assert!(!lines[2].starts_with("Near-lossless"));
         assert!(lines[2].contains("near-lossless"));
+    }
+
+    #[test]
+    fn a_ticked_vship_metric_with_a_color_range_mismatch_gets_a_gap_note() {
+        let reference = media_info(1920, 1080, ColorRange::Tv, "yuv420p", "h264", 150);
+        let encode = media_info(1920, 1080, ColorRange::Pc, "yuv420p", "h264", 150);
+        let metrics = BTreeSet::from([MetricId::Ssimulacra2]);
+        let detected = detect_all(&reference, &encode, "encode.mp4", None, &metrics, &[], 3.0);
+
+        let notes = detect_vship_gap_notes(&metrics, &detected.corrections);
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.message.contains("color range"))
+        );
+    }
+
+    #[test]
+    fn a_ticked_vship_metric_with_a_resolution_mismatch_gets_a_gap_note() {
+        let reference = media_info(3840, 2160, ColorRange::Tv, "yuv420p", "h264", 150);
+        let encode = media_info(1920, 1080, ColorRange::Tv, "yuv420p", "h264", 150);
+        let metrics = BTreeSet::from([MetricId::Cvvdp]);
+        let detected = detect_all(&reference, &encode, "encode.mp4", None, &metrics, &[], 3.0);
+
+        let notes = detect_vship_gap_notes(&metrics, &detected.corrections);
+        assert!(notes.iter().any(|note| note.message.contains("resolution")));
+    }
+
+    #[test]
+    fn identical_files_give_no_gap_note_even_with_a_vship_metric_ticked() {
+        let (reference, encode) = identical_pair();
+        let metrics = BTreeSet::from([MetricId::Ssimulacra2]);
+        let detected = detect_all(&reference, &encode, "encode.mp4", None, &metrics, &[], 3.0);
+
+        assert!(detect_vship_gap_notes(&metrics, &detected.corrections).is_empty());
+    }
+
+    #[test]
+    fn an_ffmpeg_only_job_gets_no_gap_note_even_with_a_real_mismatch() {
+        let reference = media_info(1920, 1080, ColorRange::Tv, "yuv420p", "h264", 150);
+        let encode = media_info(1920, 1080, ColorRange::Pc, "yuv420p", "h264", 150);
+        let metrics = BTreeSet::from([MetricId::PsnrY]);
+        let detected = detect_all(&reference, &encode, "encode.mp4", None, &metrics, &[], 3.0);
+
+        assert!(!detected.corrections.is_empty());
+        assert!(detect_vship_gap_notes(&metrics, &detected.corrections).is_empty());
+    }
+
+    #[test]
+    fn a_frame_count_mismatch_is_never_a_gap_note() {
+        let reference = media_info(1920, 1080, ColorRange::Tv, "yuv420p", "h264", 150);
+        let encode = media_info(1920, 1080, ColorRange::Tv, "yuv420p", "h264", 140);
+        let metrics = BTreeSet::from([MetricId::Ssimulacra2]);
+        let detected = detect_all(&reference, &encode, "encode.mp4", None, &metrics, &[], 3.0);
+
+        assert!(!detected.corrections.is_empty());
+        assert!(detect_vship_gap_notes(&metrics, &detected.corrections).is_empty());
     }
 }
