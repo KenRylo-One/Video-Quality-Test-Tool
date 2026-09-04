@@ -255,6 +255,13 @@ pub struct MetricDef {
     pub unit: Unit,
     /// The range, as a sentence for the interface.
     pub range: &'static str,
+    /// The low edge of the drawn vertical axis. This is a legibility window, not the
+    /// full range of the metric. PSNR draws from 20 dB because nothing readable
+    /// happens below it. A value outside the window is clipped, and a series with no
+    /// value inside it makes the plot fit the data instead.
+    pub plot_lo: f32,
+    /// The high edge of the drawn vertical axis.
+    pub plot_hi: f32,
     /// Which way is better.
     pub direction: Direction,
     /// Whether the harmonic mean is defensible.
@@ -288,6 +295,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::Ffmpeg,
         unit: Unit::Db,
         range: "0 to about 60 dB",
+        plot_lo: 20.0,
+        plot_hi: 48.0,
         direction: Direction::HigherIsBetter,
         harmonic_mean: HarmonicMean::Allowed,
         providers: &[
@@ -318,6 +327,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::Ffmpeg,
         unit: Unit::Ratio,
         range: "-1 to 1",
+        plot_lo: 0.7,
+        plot_hi: 1.0,
         direction: Direction::HigherIsBetter,
         harmonic_mean: HarmonicMean::AllowedAboveZero,
         providers: &[
@@ -350,6 +361,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::Ffmpeg,
         unit: Unit::Db,
         range: "dB, the lowest plane average",
+        plot_lo: 22.0,
+        plot_hi: 52.0,
         direction: Direction::HigherIsBetter,
         harmonic_mean: HarmonicMean::Allowed,
         providers: &[Provider {
@@ -369,6 +382,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::LibVmaf,
         unit: Unit::Ratio,
         range: "0 to 1",
+        plot_lo: 0.7,
+        plot_hi: 1.0,
         direction: Direction::HigherIsBetter,
         harmonic_mean: HarmonicMean::Allowed,
         providers: &[Provider {
@@ -388,6 +403,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::LibVmaf,
         unit: Unit::Db,
         range: "dB",
+        plot_lo: 20.0,
+        plot_hi: 48.0,
         direction: Direction::HigherIsBetter,
         harmonic_mean: HarmonicMean::Allowed,
         providers: &[Provider {
@@ -407,6 +424,10 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::LibVmaf,
         unit: Unit::Index,
         range: "0 to about 50, unbounded upward, infinite at a perfect match",
+        // Measured on this project's own test content: TEST_A against TEST_B
+        // gives 56.7, and TEST_A against a CRF 45 encode gives 44.0.
+        plot_lo: 35.0,
+        plot_hi: 65.0,
         direction: Direction::HigherIsBetter,
         harmonic_mean: HarmonicMean::Allowed,
         providers: &[Provider {
@@ -428,6 +449,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::LibVmaf,
         unit: Unit::Score,
         range: "0 to 100",
+        plot_lo: 45.0,
+        plot_hi: 100.0,
         direction: Direction::HigherIsBetter,
         harmonic_mean: HarmonicMean::Allowed,
         providers: &[
@@ -458,6 +481,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::LibVmaf,
         unit: Unit::Score,
         range: "0 to 100",
+        plot_lo: 45.0,
+        plot_hi: 100.0,
         direction: Direction::HigherIsBetter,
         harmonic_mean: HarmonicMean::Allowed,
         providers: &[
@@ -490,6 +515,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::LibVmaf,
         unit: Unit::Score,
         range: "0 to 100",
+        plot_lo: 45.0,
+        plot_hi: 100.0,
         direction: Direction::HigherIsBetter,
         harmonic_mean: HarmonicMean::Allowed,
         providers: &[Provider {
@@ -511,6 +538,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::LibVmaf,
         unit: Unit::Index,
         range: "0 to 24",
+        plot_lo: 0.0,
+        plot_hi: 24.0,
         direction: Direction::LowerIsBetter,
         harmonic_mean: HarmonicMean::Blocked(
             "CAMBI starts at 0, and the harmonic mean fails on zero.",
@@ -534,6 +563,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::LibVmaf,
         unit: Unit::Index,
         range: "0 to 17",
+        plot_lo: 0.0,
+        plot_hi: 17.0,
         direction: Direction::LowerIsBetter,
         harmonic_mean: HarmonicMean::Blocked(
             "CAMBI starts at 0, and the harmonic mean fails on zero.",
@@ -557,6 +588,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::Ffvship,
         unit: Unit::Score,
         range: "below 0 to 100",
+        plot_lo: 35.0,
+        plot_hi: 100.0,
         direction: Direction::HigherIsBetter,
         harmonic_mean: HarmonicMean::Blocked(
             "SSIMULACRA 2 goes negative for strong distortion, and the harmonic mean fails on a negative value.",
@@ -589,6 +622,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::Ffvship,
         unit: Unit::Distance,
         range: "0 upward",
+        plot_lo: 0.0,
+        plot_hi: 12.0,
         direction: Direction::LowerIsBetter,
         harmonic_mean: HarmonicMean::Blocked(
             "Butteraugli starts at 0, and the harmonic mean fails on zero.",
@@ -610,6 +645,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::Ffvship,
         unit: Unit::Distance,
         range: "0 upward",
+        plot_lo: 0.0,
+        plot_hi: 12.0,
         direction: Direction::LowerIsBetter,
         harmonic_mean: HarmonicMean::Blocked(
             "Butteraugli starts at 0, and the harmonic mean fails on zero.",
@@ -633,6 +670,8 @@ pub const REGISTRY: &[MetricDef] = &[
         group: MetricGroup::Ffvship,
         unit: Unit::Jod,
         range: "0 to 10 JOD",
+        plot_lo: 0.0,
+        plot_hi: 10.0,
         direction: Direction::HigherIsBetter,
         harmonic_mean: HarmonicMean::Allowed,
         providers: &[Provider {
@@ -781,6 +820,30 @@ mod tests {
             MetricId::ButteraugliMax.def().direction.bad_end(),
             Percentile::P95
         );
+    }
+
+    #[test]
+    fn every_plot_window_runs_low_to_high() {
+        for def in REGISTRY {
+            assert!(
+                def.plot_lo < def.plot_hi,
+                "{} draws from {} to {}",
+                def.id.key(),
+                def.plot_lo,
+                def.plot_hi
+            );
+        }
+    }
+
+    #[test]
+    fn a_low_is_better_window_is_not_stored_reversed() {
+        let low: Vec<&MetricDef> = REGISTRY
+            .iter()
+            .filter(|def| def.direction == Direction::LowerIsBetter)
+            .collect();
+        assert!(!low.is_empty(), "the registry holds no low-is-better metric");
+        assert_eq!(MetricId::Cambi.def().plot_lo, 0.0);
+        assert_eq!(MetricId::Cambi.def().plot_hi, 24.0);
     }
 
     #[test]
