@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use vqa_backends::ffmpeg;
+use vqa_backends::{ffmpeg, vship};
 use vqa_core::backend::{JobInput, MeasureJob};
 use vqa_core::corrections;
 use vqa_core::metric::MetricId;
@@ -83,11 +83,19 @@ impl RunState {
                 work_dir: encode_work_dir,
                 vmaf_models: vmaf_models.clone(),
                 vmaf_viewing_distance,
+                butteraugli_intensity_nits: session.settings.butteraugli_intensity_nits,
+                vship_gpu_threads: session.settings.vship_gpu_threads,
             };
 
-            let invocations = ffmpeg::plan(&job).ok()?;
+            let mut invocations = ffmpeg::plan(&job).ok()?;
+            invocations.extend(vship::plan(&job).ok()?);
             if invocations.is_empty() {
                 continue;
+            }
+            for invocation in &mut invocations {
+                if let Some(found) = session.inventory.get(invocation.binary) {
+                    invocation.program = found.path.clone();
+                }
             }
 
             let sample = session.luma_extremes(&encode.info.path);
@@ -101,6 +109,11 @@ impl RunState {
                 vmaf_viewing_distance,
             );
             notes.extend(detected.display_lines());
+            notes.extend(
+                corrections::detect_vship_gap_notes(&metrics, &detected.corrections)
+                    .into_iter()
+                    .map(|note| note.message),
+            );
 
             work.push(EncodeWork {
                 encode: encode.id,
@@ -330,6 +343,67 @@ mod tests {
             state.failures.is_empty(),
             "a real Cambi run must not fail: {:?}",
             state.failures
+        );
+    }
+
+    /// A real run of SSIMULACRA 2 through FFVship, the same layer the GUI calls.
+    /// FFVship is not on `PATH` on the development machine, so this also checks
+    /// `VQA_FFVSHIP_PATH` before skipping. Proves both that a real number lands in
+    /// `state.results` and that the color range gap note names FFVship's own gap.
+    #[test]
+    fn a_real_run_measures_ssimulacra2_and_reports_the_vship_gap_note() {
+        let media_folder =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Test-Media");
+        let reference_path = media_folder.join("TEST_B_limited_range_flagged_tv.mp4");
+        let encode_path = media_folder.join("TEST_A_full_range_flagged_pc.mp4");
+        if !reference_path.is_file() || !encode_path.is_file() {
+            return;
+        }
+
+        let mut settings = vqa_run::Settings::default();
+        if let Ok(path) = std::env::var("VQA_FFVSHIP_PATH") {
+            settings.set_binary_path(
+                vqa_core::BinaryId::Ffvship,
+                Some(std::path::PathBuf::from(path)),
+            );
+        }
+        let mut session =
+            vqa_run::Session::with_settings(settings, vqa_run::CapabilityCache::new());
+        if !session.inventory.has(vqa_core::BinaryId::Ffmpeg)
+            || !session.inventory.has(vqa_core::BinaryId::Ffprobe)
+            || !session.inventory.has(vqa_core::BinaryId::Ffvship)
+        {
+            return;
+        }
+
+        session.add_file(&reference_path);
+        session.add_file(&encode_path);
+        session.selection.metrics.clear();
+        session.toggle_metric(MetricId::Ssimulacra2, true);
+        if session.runnable_metrics().is_empty() {
+            return;
+        }
+
+        let Some(mut state) = RunState::start(&session) else {
+            panic!("a reference, an encode, and a runnable metric are all present");
+        };
+
+        assert!(
+            state
+                .notes
+                .iter()
+                .any(|line| line.contains("FFVship measured the files as delivered")),
+            "TEST_A against TEST_B must carry the FFVship color range gap note"
+        );
+
+        let encode_id = session.files.encodes().next().unwrap().id;
+        while state.poll() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            state
+                .results
+                .contains_key(&(encode_id, MetricId::Ssimulacra2))
         );
     }
 }

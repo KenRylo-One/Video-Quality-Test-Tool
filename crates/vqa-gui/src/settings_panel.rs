@@ -236,6 +236,19 @@ fn run_parameters(ui: &mut Ui, tokens: &Tokens, session: &mut Session) -> bool {
                 changed = true;
             }
         });
+        ui.horizontal(|ui| {
+            ui.label(sans("FFVship GPU threads", 12.0, tokens.text));
+            if ui
+                .add(egui::DragValue::new(&mut session.settings.vship_gpu_threads).range(1..=16))
+                .on_hover_text(
+                    "FFVship's own --gpu-threads count. A card with little VRAM can run out \
+                     of memory at a high value and needs this lower.",
+                )
+                .changed()
+            {
+                changed = true;
+            }
+        });
 
         ui.add_space(4.0);
         if ui
