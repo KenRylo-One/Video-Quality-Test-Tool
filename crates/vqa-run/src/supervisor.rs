@@ -229,6 +229,7 @@ mod tests {
     use std::path::PathBuf;
     use vqa_core::CoreError;
     use vqa_core::backend::{ExitReport, LogArtifact, LogFormat};
+    use vqa_core::capability::BinaryId;
 
     struct FakeRunner {
         succeed: bool,
@@ -274,6 +275,7 @@ mod tests {
                     metrics: vec![MetricId::PsnrY],
                 }],
                 lane: LaneKind::Cpu,
+                binary: BinaryId::Ffmpeg,
             }],
         }
     }
@@ -337,6 +339,7 @@ mod tests {
                         metrics: vec![MetricId::PsnrY],
                     }],
                     lane: LaneKind::Cpu,
+                    binary: BinaryId::Ffmpeg,
                 },
                 Invocation {
                     program: PathBuf::from("ffmpeg"),
@@ -349,6 +352,7 @@ mod tests {
                         metrics: vec![MetricId::PsnrY],
                     }],
                     lane: LaneKind::Cpu,
+                    binary: BinaryId::Ffmpeg,
                 },
             ],
         }];
