@@ -18,21 +18,21 @@ pub fn sans(text: impl Into<String>, size: f32, color: Color32) -> RichText {
         .color(color)
 }
 
-/// The heading of one numbered section.
-pub fn section_header(ui: &mut Ui, tokens: &Tokens, step: &str, title: &str) {
-    section_header_with(ui, tokens, step, title, |_| {});
+/// The heading of one section.
+pub fn section_header(ui: &mut Ui, tokens: &Tokens, title: &str) {
+    section_header_with(ui, tokens, title, |_| {});
 }
 
-/// The heading of one numbered section, with more content at the right of the row.
+/// The heading of one section, with more content at the right of the row.
+///
+/// A heading carries no step number. The page is not a sequence of steps.
 pub fn section_header_with(
     ui: &mut Ui,
     tokens: &Tokens,
-    step: &str,
     title: &str,
     right_side: impl FnOnce(&mut Ui),
 ) {
     ui.horizontal(|ui| {
-        ui.label(mono(step, 10.5, tokens.accent));
         ui.label(sans(title, 17.0, tokens.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), right_side);
     });

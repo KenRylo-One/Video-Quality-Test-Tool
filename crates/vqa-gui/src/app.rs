@@ -6,6 +6,7 @@
 use crate::files::{self, FilesAction};
 use crate::metrics::{self, MetricsAction, MetricsUi};
 use crate::notes;
+use crate::right::PlotUi;
 use crate::run::RunState;
 use crate::settings_panel::{self, SettingsUi};
 use crate::theme::Tokens;
@@ -35,6 +36,7 @@ pub struct VqaApp {
     tokens: Tokens,
     metrics_ui: MetricsUi,
     settings_ui: SettingsUi,
+    plot_ui: PlotUi,
     run: Option<RunState>,
 }
 
@@ -58,6 +60,7 @@ impl VqaApp {
             tokens,
             metrics_ui: MetricsUi::default(),
             settings_ui,
+            plot_ui: PlotUi::default(),
             run: None,
         }
     }
@@ -227,12 +230,25 @@ impl eframe::App for VqaApp {
                     ui.horizontal_top(|ui| {
                         ui.vertical(|ui| self.left_column(ui));
                         ui.add_space(COLUMN_GAP);
-                        let no_results = HashMap::new();
-                        let results = self
-                            .run
-                            .as_ref()
-                            .map_or(&no_results, |run_state| &run_state.results);
-                        ui.vertical(|ui| right::show(ui, &self.tokens, &self.session, results));
+                        let empty_results = HashMap::new();
+                        let empty_series = HashMap::new();
+                        let view = match &self.run {
+                            Some(run_state) => right::RunView {
+                                results: &run_state.results,
+                                series: &run_state.series,
+                                first_frame: run_state.first_frame,
+                                frame_rate: run_state.frame_rate,
+                            },
+                            None => right::RunView {
+                                results: &empty_results,
+                                series: &empty_series,
+                                first_frame: 0,
+                                frame_rate: vqa_core::media::Rational::ZERO,
+                            },
+                        };
+                        ui.vertical(|ui| {
+                            right::show(ui, &self.tokens, &self.session, &view, &mut self.plot_ui)
+                        });
                     });
 
                     let has_results = self

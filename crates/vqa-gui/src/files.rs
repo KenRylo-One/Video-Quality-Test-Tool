@@ -34,7 +34,7 @@ pub enum FilesAction {
 pub fn show(ui: &mut Ui, tokens: &Tokens, session: &Session) -> FilesAction {
     let mut action = FilesAction::None;
 
-    section_header_with(ui, tokens, "1", "Files", |ui| {
+    section_header_with(ui, tokens, "Files", |ui| {
         if ui
             .button(sans("Import videos", 11.5, tokens.text))
             .clicked()

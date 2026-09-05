@@ -69,7 +69,7 @@ pub fn show(
 ) -> MetricsAction {
     let mut action = MetricsAction::None;
 
-    section_header(ui, tokens, "2", "Metric setup");
+    section_header(ui, tokens, "Metric setup");
 
     let preset_label = session.selection.preset.unwrap_or("Preset…").to_string();
     egui::ComboBox::from_id_salt("preset")

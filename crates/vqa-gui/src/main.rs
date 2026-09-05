@@ -7,6 +7,7 @@ mod files;
 mod fonts;
 mod metrics;
 mod notes;
+mod plot;
 mod right;
 mod run;
 mod settings_panel;
