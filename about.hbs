@@ -1,0 +1,34 @@
+Third-party notices
+===================
+
+Video Quality Test Tool is licensed under MIT OR Apache-2.0. Refer to LICENSE-MIT and
+LICENSE-APACHE.
+
+This file covers the code that is built into the binary. It does not cover FFmpeg, vmaf,
+FFVship or ssimulacra2_rs. The tool starts each of those as a separate process, links none of
+them, and ships none of them. You supply them yourself.
+
+The window ships the IBM Plex faces that are in crates/vqtt-gui/assets/fonts. They are under
+the SIL Open Font License 1.1, and their notice is:
+
+    Copyright (c) 2017 IBM Corp. with Reserved Font Name "Plex"
+
+The full text of that license is below, under OFL-1.1.
+
+This file is generated. To write it again, run:
+
+    cargo about generate about.hbs -o THIRD-PARTY
+
+{{#each licenses}}
+--------------------------------------------------------------------------------
+{{{name}}}
+--------------------------------------------------------------------------------
+
+Used by:
+{{#each used_by}}
+    {{{crate.name}}} {{{crate.version}}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}
