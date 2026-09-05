@@ -19,8 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The media tests need FFmpeg and a video file, so they return quietly here and this
-      # job proves test layers 1 and 2 only. A local run sets VQTT_REQUIRE_MEDIA=1.
+      # This job proves test layers 1 and 2. No test needs a binary or a video file, so a
+      # pass here means the same thing on every machine.
       - name: Install what eframe needs to build on Linux
         if: runner.os == 'Linux'
         run: |
