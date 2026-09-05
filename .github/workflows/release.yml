@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build for ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install what eframe needs to build on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+
+      - run: rustup target add ${{ matrix.target }}
+
+      - run: cargo build --release --locked -p vqtt-gui --target ${{ matrix.target }}
+
+      - name: Build the archive
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(git rev-parse --short HEAD)"
+          fi
+          name="vqtt-${version}-${{ matrix.target }}"
+          mkdir -p "staging/${name}"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/vqtt.exe" "staging/${name}/"
+          else
+            cp "target/${{ matrix.target }}/release/vqtt" "staging/${name}/"
+          fi
+          cp README.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY "staging/${name}/"
+          cd staging
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "../${name}.zip" "${name}" > /dev/null
+          else
+            tar czf "../${name}.tar.gz" "${name}"
+          fi
+          echo "ASSET=${name}.${{ matrix.archive }}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: ${{ env.ASSET }}
+
+      - name: Attach the archive to the release
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" "$ASSET" --clobber
