@@ -56,16 +56,22 @@ impl Discovery {
 
 /// Finds one binary, or reports that it is not there.
 pub fn find_path(id: BinaryId, discovery: &Discovery) -> Option<PathBuf> {
+    let file_name = format!("{}{}", id.command_name(), EXE_SUFFIX);
+
     if let Some(path) = discovery.overrides.get(&id) {
         if is_program(path) {
             return Some(path.clone());
+        }
+        // A downloaded back end arrives as a folder, and naming the folder is what a
+        // reader does first. Look inside it for the program before giving up.
+        let inside = path.join(&file_name);
+        if is_program(&inside) {
+            return Some(inside);
         }
         // A path that the user set and that is wrong must not fall through in silence.
         // The Settings panel reads this as "not found" and shows the path that failed.
         return None;
     }
-
-    let file_name = format!("{}{}", id.command_name(), EXE_SUFFIX);
 
     if let Some(folder) = &discovery.tool_folder {
         let beside = folder.join("bin").join(&file_name);
@@ -186,6 +192,34 @@ mod tests {
         let mut discovery = Discovery::default();
         discovery.set_override(BinaryId::Ffmpeg, Some(PathBuf::from("/no/such/ffmpeg")));
         assert_eq!(find_path(BinaryId::Ffmpeg, &discovery), None);
+    }
+
+    #[test]
+    fn an_override_that_names_the_folder_finds_the_program_inside_it() {
+        let folder = std::env::temp_dir().join("vqa-discovery-folder-test");
+        std::fs::create_dir_all(&folder).unwrap();
+        let program = folder.join(format!("{}{EXE_SUFFIX}", BinaryId::Ffvship.command_name()));
+        std::fs::write(&program, b"not a real program").unwrap();
+
+        let mut discovery = Discovery::default();
+        discovery.set_override(BinaryId::Ffvship, Some(folder.clone()));
+        assert_eq!(find_path(BinaryId::Ffvship, &discovery), Some(program));
+
+        // A folder that holds no such program is still not found.
+        discovery.set_override(BinaryId::Vmaf, Some(folder));
+        assert_eq!(find_path(BinaryId::Vmaf, &discovery), None);
+    }
+
+    #[test]
+    fn an_override_that_names_the_program_itself_still_wins() {
+        let folder = std::env::temp_dir().join("vqa-discovery-file-test");
+        std::fs::create_dir_all(&folder).unwrap();
+        let program = folder.join(format!("{}{EXE_SUFFIX}", BinaryId::Ffvship.command_name()));
+        std::fs::write(&program, b"not a real program").unwrap();
+
+        let mut discovery = Discovery::default();
+        discovery.set_override(BinaryId::Ffvship, Some(program.clone()));
+        assert_eq!(find_path(BinaryId::Ffvship, &discovery), Some(program));
     }
 
     #[test]
