@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
@@ -26,8 +26,10 @@ pub struct RunState {
     /// horizontal axis reads real frame numbers, not offsets into a clamped range.
     pub first_frame: u64,
     pub frame_rate: vqa_core::media::Rational,
-    /// The metric a lane last reported a frame for, and how far it has reached.
-    pub progress: Option<(MetricId, u64)>,
+    /// The measurements that are running now, and how far each has reached. A metric
+    /// that already landed leaves this map, so a finished measurement never keeps the
+    /// title bar and reads as the one holding the run up.
+    running: BTreeMap<(FileId, MetricId), u64>,
     /// How many frames one metric covers, for the progress bar.
     pub total_frames: Option<u64>,
     cancel: Arc<AtomicBool>,
@@ -165,7 +167,7 @@ impl RunState {
             notes,
             first_frame: frame_range.map_or(0, |(first, _)| first),
             frame_rate: reference.info.frame_rate,
-            progress: None,
+            running: BTreeMap::new(),
             total_frames: measured_frame_count(reference.info.nb_frames, frame_range),
             cancel,
         })
@@ -176,8 +178,18 @@ impl RunState {
     pub fn poll(&mut self) -> bool {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
-                SupervisorEvent::Progress { metric, frame, .. } => {
-                    self.progress = Some((metric, frame));
+                SupervisorEvent::Started { encode, metric } => {
+                    self.running.insert((encode, metric), 0);
+                }
+                SupervisorEvent::Progress {
+                    encode,
+                    metric,
+                    frame,
+                } => {
+                    self.running.insert((encode, metric), frame);
+                }
+                SupervisorEvent::ItemDone { encode, metric } => {
+                    self.running.remove(&(encode, metric));
                 }
                 SupervisorEvent::MetricReady {
                     encode,
@@ -204,15 +216,46 @@ impl RunState {
         self.encodes_remaining > 0
     }
 
-    /// Stops the run. Queued work is dropped and the running process is killed at its
-    /// next progress line. Whatever already finished stays on screen.
+    /// Stops the run. Queued work is dropped, and every running process is killed
+    /// within a fifth of a second, whether it is still saying anything or not.
+    /// Whatever already finished stays on screen.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
 
+    /// Every line the reader needs about this run: what the tool corrected, then every
+    /// back end that gave no number and what it said about it.
+    ///
+    /// A failure that reaches nobody is the same as no failure at all. The reader is
+    /// left comparing a table with a column missing and no reason for it.
+    pub fn note_lines(&self) -> Vec<String> {
+        let mut lines = self.notes.clone();
+        for failure in &self.failures {
+            if !lines.contains(failure) {
+                lines.push(failure.clone());
+            }
+        }
+        lines
+    }
+
+    /// True once the run has anything at all to show.
+    pub fn has_something_to_say(&self) -> bool {
+        !self.results.is_empty() || !self.failures.is_empty()
+    }
+
+    /// What the title bar names: the measurement holding the run up, how far it has
+    /// reached, and how many others run beside it.
+    ///
+    /// The one that has reached the fewest frames is the honest answer to what the run
+    /// is waiting on, and it is the one still there when every other lane has finished.
+    pub fn current(&self) -> Option<(MetricId, u64, usize)> {
+        let ((_, metric), frame) = self.running.iter().min_by_key(|(_, frame)| **frame)?;
+        Some((*metric, *frame, self.running.len() - 1))
+    }
+
     /// How far the run has reached, from 0.0 to 1.0, when the frame count is known.
     pub fn fraction(&self) -> Option<f32> {
-        let (_, frame) = self.progress?;
+        let (_, frame, _) = self.current()?;
         let total = self.total_frames?;
         if total == 0 {
             return None;
@@ -231,7 +274,7 @@ impl RunState {
             notes: Vec::new(),
             first_frame: 0,
             frame_rate: vqa_core::media::Rational { num: 25, den: 1 },
-            progress: None,
+            running: BTreeMap::new(),
             total_frames: None,
             cancel: Arc::new(AtomicBool::new(false)),
         }
@@ -299,6 +342,73 @@ mod tests {
             state.series.get(&(FileId(7), MetricId::PsnrY)),
             Some(&values)
         );
+    }
+
+    /// The regression test for a title bar that named the wrong back end.
+    ///
+    /// A real run measured CAMBI to its last frame and then waited on FFVship, which
+    /// had stalled. The bar still read "CAMBI · frame 150", so the metric that had
+    /// already finished looked like the one that was stuck.
+    #[test]
+    fn a_finished_metric_stops_naming_the_title_bar() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = RunState::for_test(1, receiver);
+
+        for event in [
+            SupervisorEvent::Started {
+                encode: FileId(1),
+                metric: MetricId::Cambi,
+            },
+            SupervisorEvent::Started {
+                encode: FileId(1),
+                metric: MetricId::Ssimulacra2,
+            },
+            SupervisorEvent::Progress {
+                encode: FileId(1),
+                metric: MetricId::Cambi,
+                frame: 150,
+            },
+        ] {
+            sender.send(event).unwrap();
+        }
+        state.poll();
+        assert_eq!(
+            state.current(),
+            Some((MetricId::Ssimulacra2, 0, 1)),
+            "the metric with no frames yet is the one holding the run up"
+        );
+
+        sender
+            .send(SupervisorEvent::ItemDone {
+                encode: FileId(1),
+                metric: MetricId::Cambi,
+            })
+            .unwrap();
+        state.poll();
+        assert_eq!(state.current(), Some((MetricId::Ssimulacra2, 0, 0)));
+    }
+
+    #[test]
+    fn nothing_running_leaves_the_title_bar_with_no_metric_to_name() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = RunState::for_test(1, receiver);
+
+        sender
+            .send(SupervisorEvent::Started {
+                encode: FileId(1),
+                metric: MetricId::PsnrY,
+            })
+            .unwrap();
+        sender
+            .send(SupervisorEvent::ItemDone {
+                encode: FileId(1),
+                metric: MetricId::PsnrY,
+            })
+            .unwrap();
+        state.poll();
+
+        assert_eq!(state.current(), None);
+        assert_eq!(state.fraction(), None);
     }
 
     #[test]
@@ -481,14 +591,23 @@ mod tests {
             "TEST_A against TEST_B must carry the FFVship color range gap note"
         );
 
+        // FFVship 5.1.1 prints an out of video memory error and then never exits, on a
+        // card that cannot hold the metric. This test asks it to stop rather than wait
+        // for a process that has already decided not to finish.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         let encode_id = session.files.encodes().next().unwrap().id;
         while state.poll() {
+            if std::time::Instant::now() > deadline {
+                state.cancel();
+            }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(
             state
                 .results
-                .contains_key(&(encode_id, MetricId::Ssimulacra2))
+                .contains_key(&(encode_id, MetricId::Ssimulacra2)),
+            "FFVship gave no SSIMULACRA 2 value: {:?}",
+            state.failures
         );
     }
 }

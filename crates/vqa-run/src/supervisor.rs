@@ -2,8 +2,9 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use vqa_backends::parse::stats_file::parse_stats_file;
 use vqa_core::backend::{BufferSink, Invocation, ProcessRunner, Progress};
 use vqa_core::capability::LaneKind;
@@ -11,14 +12,22 @@ use vqa_core::metric::MetricId;
 use vqa_core::pooling::{Pooled, pool};
 use vqa_core::set::FileId;
 
+/// How often the run loop looks at the cancel flag while a process says nothing.
+///
+/// Cancel must not wait on the next line of output. FFVship 5.1.1 prints an out of
+/// video memory error and then never exits, so a loop that blocks on a read can never
+/// reach the flag again, and the run has no way to end. Measured on the real binary.
+const CANCEL_POLL: Duration = Duration::from_millis(200);
+
+/// How many of the process's own lines to keep for a failure message.
+const KEPT_LINES: usize = 4;
+
 /// Runs a real process. This is the only real implementation of `ProcessRunner`,
 /// because this is the one place that starts a real process.
 ///
-/// It reads the child's error stream line by line rather than waiting for the whole
-/// process, which is what gives the frame counter something to report and what gives
-/// Cancel somewhere to act. FFmpeg writes `frame=N` there because of `-progress
-/// pipe:2`, and FFVship writes an index and a score for each frame because of
-/// `--live-score-output`.
+/// It reads the child's streams on their own threads rather than waiting for the whole
+/// process. That is what gives the frame counter something to report, what gives Cancel
+/// somewhere to act, and what keeps a full pipe from stopping the child.
 #[derive(Default)]
 pub struct RealProcessRunner {
     cancel: Arc<AtomicBool>,
@@ -43,6 +52,8 @@ impl ProcessRunner for RealProcessRunner {
         command.args(&invocation.args);
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+        // A back end must never wait for something to be typed at it.
+        command.stdin(Stdio::null());
         if let Some(cwd) = &invocation.cwd {
             command.current_dir(cwd);
         }
@@ -54,19 +65,36 @@ impl ProcessRunner for RealProcessRunner {
             .spawn()
             .map_err(|error| vqa_core::CoreError::parse("process", error.to_string()))?;
 
-        // The same thread reads and kills, so the child needs no lock. Cancel lands at
-        // the next progress line, which is at most half a second away.
-        let mut cancelled = false;
+        // Both streams are read, and both carry progress. FFmpeg writes `frame=N` to
+        // its error stream because of `-progress pipe:2`. FFVship writes an index and a
+        // score for each frame to its output stream because of `--live-score-output`.
+        // A stream that nobody reads also fills its pipe and stops the child, so each
+        // one is drained whether or not it carries a number.
+        let (sender, receiver) = channel();
+        if let Some(stream) = child.stdout.take() {
+            read_lines(stream, sender.clone());
+        }
         if let Some(stream) = child.stderr.take() {
-            for line in BufReader::new(stream).lines().map_while(Result::ok) {
-                if let Some(frame) = frame_of(&line) {
-                    on_progress(Progress { frame });
-                }
-                if self.cancel.load(Ordering::Relaxed) {
-                    let _ = child.kill();
-                    cancelled = true;
-                    break;
-                }
+            read_lines(stream, sender.clone());
+        }
+        drop(sender);
+
+        // The same thread reads and kills, so the child needs no lock.
+        let mut cancelled = false;
+        let mut said: VecDeque<String> = VecDeque::new();
+        loop {
+            match receiver.recv_timeout(CANCEL_POLL) {
+                Ok(line) => match frame_of(&line) {
+                    Some(frame) => on_progress(Progress { frame }),
+                    None => keep_line(&mut said, line),
+                },
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            if self.cancel.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                cancelled = true;
+                break;
             }
         }
 
@@ -77,8 +105,49 @@ impl ProcessRunner for RealProcessRunner {
         Ok(vqa_core::backend::ExitReport {
             succeeded: status.success() && !cancelled,
             wall_time_ms: start_time.elapsed().as_millis() as u64,
+            message: message_of(&said),
         })
     }
+}
+
+/// Sends every line of one stream, and leaves once the stream ends.
+fn read_lines<S: std::io::Read + Send + 'static>(stream: S, sender: Sender<String>) {
+    std::thread::spawn(move || {
+        for line in BufReader::new(stream).lines().map_while(Result::ok) {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Keeps the last few things a process said, and drops what it has no room for.
+///
+/// The end of the stream is the part worth keeping, because whatever banner the back
+/// end opened with is not why it stopped. A line the process already said is dropped:
+/// FFVship reports the same failure once for each of its own threads, and the repeats
+/// push the first and clearest copy out of the window.
+fn keep_line(said: &mut VecDeque<String>, line: String) {
+    let line = line.trim();
+    if line.is_empty() || said.iter().any(|kept| kept == line) {
+        return;
+    }
+    said.push_back(line.to_string());
+    while said.len() > KEPT_LINES {
+        said.pop_front();
+    }
+}
+
+/// Joins what a process said into one line for the reader.
+///
+/// Every kept line goes in, not just the final one. FFVship spreads one failure over
+/// three lines and puts the source file last, so the final line alone names a file in
+/// somebody else's build folder and never the reason. Measured on the real binary.
+fn message_of(said: &VecDeque<String>) -> Option<String> {
+    if said.is_empty() {
+        return None;
+    }
+    Some(said.iter().map(String::as_str).collect::<Vec<_>>().join(" "))
 }
 
 /// Reads a frame number out of one line of a back end's progress stream.
@@ -98,10 +167,22 @@ fn frame_of(line: &str) -> Option<u64> {
 }
 
 pub enum SupervisorEvent {
+    /// One invocation has begun. The interface names the metrics that are running now,
+    /// so a measurement that already landed never keeps the label and reads as the
+    /// stalled one.
+    Started {
+        encode: FileId,
+        metric: MetricId,
+    },
     Progress {
         encode: FileId,
         metric: MetricId,
         frame: u64,
+    },
+    /// One invocation has stopped, whether it gave a value or not.
+    ItemDone {
+        encode: FileId,
+        metric: MetricId,
     },
     MetricReady {
         encode: FileId,
@@ -234,12 +315,25 @@ fn spawn_worker<R>(
     });
 }
 
+/// The metric that names an invocation while it runs. One invocation can measure
+/// several metrics together, and the first is the one the interface names.
+fn leading_metric(invocation: &Invocation) -> Option<MetricId> {
+    invocation.expects.first()?.metrics.first().copied()
+}
+
 /// Counts one invocation off its encode, and reports the encode once nothing is left.
 fn finish_item(
     item: &WorkItem,
     remaining_by_encode: &Arc<Mutex<HashMap<FileId, usize>>>,
     sender: &Sender<SupervisorEvent>,
 ) {
+    if let Some(metric) = leading_metric(&item.invocation) {
+        let _ = sender.send(SupervisorEvent::ItemDone {
+            encode: item.encode,
+            metric,
+        });
+    }
+
     let done = {
         let mut remaining = remaining_by_encode.lock().unwrap();
         let count = remaining.entry(item.encode).or_insert(0);
@@ -255,16 +349,16 @@ fn finish_item(
 
 fn run_one(item: &WorkItem, runner: &dyn ProcessRunner, sender: &Sender<SupervisorEvent>) {
     let encode = item.encode;
+    let leading = leading_metric(&item.invocation);
+    if let Some(metric) = leading {
+        let _ = sender.send(SupervisorEvent::Started { encode, metric });
+    }
+
     let mut on_progress = |progress: Progress| {
-        if let Some(metric) = item
-            .invocation
-            .expects
-            .first()
-            .and_then(|artifact| artifact.metrics.first())
-        {
+        if let Some(metric) = leading {
             let _ = sender.send(SupervisorEvent::Progress {
                 encode,
-                metric: *metric,
+                metric,
                 frame: progress.frame,
             });
         }
@@ -273,10 +367,10 @@ fn run_one(item: &WorkItem, runner: &dyn ProcessRunner, sender: &Sender<Supervis
     let outcome = runner.run(&item.invocation, &mut on_progress);
     let exit_report = match outcome {
         Ok(report) if report.succeeded => report,
-        Ok(_) => {
+        Ok(report) => {
             let _ = sender.send(SupervisorEvent::Failed {
                 encode,
-                error: "the process exited with a failure".to_string(),
+                error: failure_text(item, report.message),
             });
             return;
         }
@@ -307,6 +401,18 @@ fn run_one(item: &WorkItem, runner: &dyn ProcessRunner, sender: &Sender<Supervis
                 }
             }
         }
+    }
+}
+
+/// What a run that did not finish tells the reader.
+///
+/// The words of the back end come first when it left any, because a back end names the
+/// thing to change and this tool cannot guess it.
+fn failure_text(item: &WorkItem, message: Option<String>) -> String {
+    let program = item.invocation.binary.display_name();
+    match message {
+        Some(said) => format!("{program} did not finish: {said}"),
+        None => format!("{program} did not finish, and said nothing."),
     }
 }
 
@@ -344,6 +450,7 @@ mod tests {
                 Ok(ExitReport {
                     succeeded: true,
                     wall_time_ms: 1,
+                    message: None,
                 })
             } else {
                 Err(CoreError::parse("test", "the fake runner was told to fail"))
@@ -398,6 +505,160 @@ mod tests {
         assert_eq!(frame_of("Error opening input file"), None);
         assert_eq!(frame_of(""), None);
         assert_eq!(frame_of("frame=notanumber"), None);
+    }
+
+    /// A program that runs for a long time and says nothing at all, for the cancel
+    /// test. `waitfor` waits for a signal that never comes; `sleep` just waits.
+    fn quiet_long_program() -> (&'static str, Vec<&'static str>) {
+        if cfg!(windows) {
+            ("waitfor", vec!["/t", "20", "VqaCancelTest"])
+        } else {
+            ("sleep", vec!["20"])
+        }
+    }
+
+    /// The regression test for a run that could not be stopped.
+    ///
+    /// FFVship 5.1.1 prints an out of video memory error and then never exits. Reading
+    /// the stream line by line parked the loop inside a read, so the cancel flag was
+    /// never looked at again and the run had no way to end. Cancel must not wait on a
+    /// process that has stopped speaking.
+    #[test]
+    fn cancel_stops_a_process_that_says_nothing_and_does_not_exit() {
+        let (program, args) = quiet_long_program();
+        let invocation = Invocation {
+            program: PathBuf::from(program),
+            args: args.iter().map(Into::into).collect(),
+            env: Vec::new(),
+            cwd: None,
+            expects: Vec::new(),
+            lane: LaneKind::Cpu,
+            binary: BinaryId::Ffmpeg,
+        };
+
+        let cancel = Arc::new(AtomicBool::new(true));
+        let runner = RealProcessRunner::with_cancel(cancel);
+        let start = std::time::Instant::now();
+        let Ok(report) = runner.run(&invocation, &mut |_| {}) else {
+            // This machine has no such program. The rule under test needs one.
+            return;
+        };
+
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "cancel must not wait for the process to end on its own"
+        );
+        assert!(!report.succeeded);
+    }
+
+    #[test]
+    fn the_last_words_of_a_process_reach_the_failure_message() {
+        let mut said = VecDeque::new();
+        for line in ["banner", "", "  second  ", "third", "fourth", "fifth"] {
+            keep_line(&mut said, line.to_string());
+        }
+        assert_eq!(said.len(), KEPT_LINES);
+        assert_eq!(
+            message_of(&said).as_deref(),
+            Some("second third fourth fifth")
+        );
+        assert!(
+            !message_of(&said).unwrap().contains("banner"),
+            "an opening banner is not the reason a back end failed"
+        );
+        assert_eq!(message_of(&VecDeque::new()), None);
+    }
+
+    /// What FFVship 5.1.1 really writes on a card that cannot hold the metric, read off
+    /// the running binary. It says the same three lines once for each of its threads,
+    /// and it puts the source file last, so neither the final line on its own nor a
+    /// sliding window of repeats carries the reason.
+    #[test]
+    fn the_reason_a_back_end_gives_survives_repeats_and_a_trailing_source_line() {
+        let mut said = VecDeque::new();
+        for _ in 0..2 {
+            for line in [
+                "error: VshipException",
+                "OutOfVRAM: Vship was not able to perform GPU memory allocation. (Advice) Reduce or Set numStream argument",
+                " - At line 139 of C:\\Users\\Line\\Documents\\randomgit\\Vship\\src\\HIP\\ssimu2\\main.hpp",
+            ] {
+                keep_line(&mut said, line.to_string());
+            }
+        }
+
+        let message = message_of(&said).expect("the process said something");
+        assert!(
+            message.starts_with("error: VshipException OutOfVRAM:"),
+            "the reason must lead, not a source file left over from a repeat: {message}"
+        );
+        assert!(message.contains("Reduce or Set numStream argument"), "{message}");
+        assert_eq!(
+            message.matches("At line 139").count(),
+            1,
+            "one failure said twice is still one failure: {message}"
+        );
+    }
+
+    #[test]
+    fn a_failure_names_the_binary_and_repeats_what_it_said() {
+        let stats_path = write_fixture("named_failure.log", "n:1 psnr_y:40.0\n");
+        let mut work = psnr_invocation(FileId(11), stats_path);
+        work.invocations[0].binary = BinaryId::Ffvship;
+        let item = WorkItem {
+            encode: FileId(11),
+            invocation: work.invocations.remove(0),
+        };
+
+        let text = failure_text(&item, Some("OutOfVRAM: no GPU memory".to_string()));
+        assert!(text.contains("FFVship"), "{text}");
+        assert!(text.contains("OutOfVRAM: no GPU memory"), "{text}");
+
+        let silent = failure_text(&item, None);
+        assert!(silent.contains("FFVship"), "{silent}");
+    }
+
+    #[test]
+    fn every_invocation_reports_that_it_started_and_that_it_stopped() {
+        let stats_path = write_fixture("started_stopped.log", "n:1 psnr_y:40.0\n");
+        let work = vec![psnr_invocation(FileId(5), stats_path)];
+        let receiver = run_plan(work, Arc::new(FakeRunner { succeed: true }), 1, 1);
+
+        let mut order = Vec::new();
+        for event in receiver.iter() {
+            match event {
+                SupervisorEvent::Started { metric, .. } => order.push(("started", metric)),
+                SupervisorEvent::ItemDone { metric, .. } => order.push(("done", metric)),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            order,
+            vec![
+                ("started", MetricId::PsnrY),
+                ("done", MetricId::PsnrY),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_item_that_never_ran_still_reports_that_it_stopped() {
+        let stats_path = write_fixture("cancel_item_done.log", "n:1 psnr_y:40.0\n");
+        let work = vec![psnr_invocation(FileId(6), stats_path)];
+        let cancel = Arc::new(AtomicBool::new(true));
+        let receiver =
+            run_plan_with_cancel(work, Arc::new(FakeRunner { succeed: true }), 1, 1, cancel);
+
+        let mut started = 0;
+        let mut done = 0;
+        for event in receiver.iter() {
+            match event {
+                SupervisorEvent::Started { .. } => started += 1,
+                SupervisorEvent::ItemDone { .. } => done += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(started, 0, "a cancelled run starts nothing");
+        assert_eq!(done, 1, "the title bar must not keep naming it");
     }
 
     #[test]

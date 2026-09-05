@@ -215,16 +215,18 @@ impl VqaApp {
 
     /// The metric a lane is on, how far it has reached, and a bar for the share.
     ///
-    /// A back end that reports no frame still gets a name and a moving bar, because a
-    /// still bar reads as a stall rather than as a run with no counter.
+    /// The metric named here is the one the run is waiting on, never one that already
+    /// gave its value. A reader who sees a finished metric's name on a stalled run
+    /// blames the wrong back end.
     fn run_progress(&self, ui: &mut egui::Ui) {
         let Some(run_state) = &self.run else {
             return;
         };
 
-        let label = match run_state.progress {
-            Some((metric, frame)) => {
-                format!("{} · frame {frame}", metric.def().label)
+        let label = match run_state.current() {
+            Some((metric, frame, 0)) => format!("{} · frame {frame}", metric.def().label),
+            Some((metric, frame, others)) => {
+                format!("{} · frame {frame} · {others} more", metric.def().label)
             }
             None => "Running…".to_string(),
         };
@@ -363,18 +365,13 @@ impl eframe::App for VqaApp {
                         });
                     });
 
-                    let has_results = self
-                        .run
-                        .as_ref()
-                        .is_some_and(|run_state| !run_state.results.is_empty());
-                    if has_results {
+                    // A run that measured nothing still has notes worth reading. That
+                    // is the run where the reader most needs to know what went wrong.
+                    if let Some(run_state) = &self.run
+                        && run_state.has_something_to_say()
+                    {
                         ui.add_space(SECTION_GAP);
-                        let no_notes = Vec::new();
-                        let run_notes = self
-                            .run
-                            .as_ref()
-                            .map_or(&no_notes, |run_state| &run_state.notes);
-                        notes::show(ui, &self.tokens, run_notes);
+                        notes::show(ui, &self.tokens, &run_state.note_lines());
                     }
                 });
             });
