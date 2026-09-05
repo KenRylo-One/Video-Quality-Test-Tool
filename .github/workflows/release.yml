@@ -4,6 +4,14 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      release_type:
+        description: Full release or pre-release. Pick the branch to build from above.
+        type: choice
+        options:
+          - prerelease
+          - release
+        default: prerelease
 
 permissions:
   contents: write
@@ -12,8 +20,60 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    name: Work out the tag and version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.info.outputs.tag }}
+      file_version: ${{ steps.info.outputs.file_version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Work out the tag and the version to put in file names
+        id: info
+        shell: bash
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            tag="$GITHUB_REF_NAME"
+            file_version="${tag#v}"
+            prerelease=false
+          else
+            version="$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)"/\1/')"
+            sha="$(git rev-parse --short HEAD)"
+            if [ "${{ inputs.release_type }}" = "prerelease" ]; then
+              tag="v${version}-${sha}"
+              file_version="${version}-${sha}"
+              prerelease=true
+            else
+              tag="v${version}"
+              file_version="${version}"
+              prerelease=false
+            fi
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "file_version=${file_version}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+
+      - name: Create the release if it does not exist yet
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "${{ steps.info.outputs.tag }}" >/dev/null 2>&1; then
+            extra_flag=""
+            if [ "${{ steps.info.outputs.prerelease }}" = "true" ]; then
+              extra_flag="--prerelease"
+            fi
+            gh release create "${{ steps.info.outputs.tag }}" \
+              --target "$GITHUB_SHA" \
+              --title "${{ steps.info.outputs.tag }}" \
+              --generate-notes \
+              $extra_flag
+          fi
+
   build:
     name: build for ${{ matrix.target }}
+    needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -29,7 +89,7 @@ jobs:
             target: aarch64-apple-darwin
             archive: tar.gz
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install what eframe needs to build on Linux
         if: runner.os == 'Linux'
@@ -45,12 +105,7 @@ jobs:
       - name: Build the archive
         shell: bash
         run: |
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            version="${GITHUB_REF_NAME#v}"
-          else
-            version="$(git rev-parse --short HEAD)"
-          fi
-          name="vqtt-${version}-${{ matrix.target }}"
+          name="vqtt-${{ needs.prepare.outputs.file_version }}-${{ matrix.target }}"
           mkdir -p "staging/${name}"
           if [ "$RUNNER_OS" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/vqtt.exe" "staging/${name}/"
@@ -66,14 +121,13 @@ jobs:
           fi
           echo "ASSET=${name}.${{ matrix.archive }}" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ASSET }}
           path: ${{ env.ASSET }}
 
       - name: Attach the archive to the release
-        if: github.ref_type == 'tag'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" "$ASSET" --clobber
+        run: gh release upload "${{ needs.prepare.outputs.tag }}" "$ASSET" --clobber
