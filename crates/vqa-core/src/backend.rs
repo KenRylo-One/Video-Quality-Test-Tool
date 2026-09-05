@@ -6,11 +6,13 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+#[derive(Clone)]
 pub struct JobInput {
     pub path: PathBuf,
     pub info: MediaInfo,
 }
 
+#[derive(Clone)]
 pub struct MeasureJob {
     pub reference: JobInput,
     pub encode: JobInput,
