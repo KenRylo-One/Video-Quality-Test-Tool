@@ -34,8 +34,6 @@ pub struct Tokens {
     pub accent: Color32,
     /// Text on an accent fill.
     pub on_accent: Color32,
-    /// The grid of a plot.
-    pub plot_grid: Color32,
     /// A difference mark, and the label of a note.
     pub warn: Color32,
     /// The body of a note.
@@ -70,7 +68,6 @@ pub const DARK: Tokens = Tokens {
     text_muted: rgb(0x7c828e),
     accent: rgb(0x3987e5),
     on_accent: rgb(0x0d1117),
-    plot_grid: rgb(0x20242c),
     warn: rgb(0xc98862),
     note_text: rgb(0xc3ab9a),
     good: rgb(0x199e70),
@@ -90,7 +87,6 @@ pub const LIGHT: Tokens = Tokens {
     text_muted: rgb(0x6b6963),
     accent: rgb(0x1f63b8),
     on_accent: rgb(0xfcfcfb),
-    plot_grid: rgb(0xe4e2dc),
     warn: rgb(0xa15b2e),
     note_text: rgb(0x7a5138),
     good: rgb(0x158a5f),
@@ -226,5 +222,28 @@ mod tests {
     #[test]
     fn the_frame_viewer_gray_is_the_same_in_both_themes() {
         assert_eq!(FRAME_VIEWER_GRAY, rgb(0x808080));
+    }
+
+    /// The window and the exported file take their plot colours from two places, so a
+    /// changed token here must not leave an SVG painting the old one.
+    #[test]
+    fn the_plot_chrome_matches_the_tokens_of_the_same_theme() {
+        for tokens in [DARK, LIGHT] {
+            let chrome = vqa_core::plot::Chrome::for_theme(tokens.theme);
+            let same = |left: Color32, right: vqa_core::plot::Rgba| {
+                assert_eq!(
+                    (left.r(), left.g(), left.b()),
+                    (right.r, right.g, right.b),
+                    "{:?} chrome and tokens disagree",
+                    tokens.theme
+                );
+            };
+            same(tokens.border, chrome.axis);
+            same(tokens.text, chrome.text);
+            same(tokens.text_secondary, chrome.text_secondary);
+            same(tokens.text_muted, chrome.text_muted);
+            same(tokens.warn, chrome.warn);
+            same(tokens.sunken, chrome.surface);
+        }
     }
 }

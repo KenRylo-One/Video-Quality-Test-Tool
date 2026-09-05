@@ -12,6 +12,7 @@ pub mod media;
 pub mod metric;
 pub mod palette;
 pub mod plot;
+pub mod plot_svg;
 pub mod pooling;
 pub mod preset;
 pub mod probe;
@@ -35,7 +36,10 @@ pub use metric::{
     REGISTRY, Unit,
 };
 pub use palette::{SeriesColor, Theme};
-pub use plot::{Body, PlotRequest, Scene, SeriesInput, build_scenes};
+pub use plot::{
+    Body, Canvas, Chrome, PlotRequest, Rgba, Scene, SeriesInput, TextAlign, build_scenes, draw,
+};
+pub use plot_svg::to_svg;
 pub use pooling::{Pooled, pool};
 pub use preset::{PRESETS, Preset};
 pub use probe::MediaProbe;

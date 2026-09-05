@@ -254,7 +254,7 @@ fn plot_card(
                 tokens.text_secondary,
             );
         }
-        renderer::paint(&painter, tokens, scene, top);
+        renderer::paint(&painter, tokens.theme, scene, top);
         top.y += scene.size.1;
     }
 

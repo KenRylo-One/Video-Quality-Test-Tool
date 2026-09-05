@@ -634,6 +634,337 @@ fn crosshair(
     Some(plot.x + share * plot.w)
 }
 
+/// A colour with an alpha, for a renderer that does not know `egui`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgba {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl Rgba {
+    pub const fn opaque(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b, a: 255 }
+    }
+
+    pub const fn with_alpha(self, a: u8) -> Self {
+        Self { a, ..self }
+    }
+
+    fn of(color: SeriesColor, a: u8) -> Self {
+        Self {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a,
+        }
+    }
+}
+
+/// Every colour the plot chrome uses.
+///
+/// The window and the exported file take their values from here, so one theme cannot
+/// drift from the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chrome {
+    pub grid: Rgba,
+    pub axis: Rgba,
+    pub text: Rgba,
+    pub text_muted: Rgba,
+    pub text_secondary: Rgba,
+    pub warn: Rgba,
+    /// The card the plot sits on. An exported file paints it, since the file has no
+    /// window behind it.
+    pub surface: Rgba,
+    pub tint: Rgba,
+}
+
+impl Chrome {
+    pub const fn for_theme(theme: Theme) -> Self {
+        match theme {
+            Theme::Dark => Self {
+                grid: Rgba::opaque(0x20, 0x24, 0x2c),
+                axis: Rgba::opaque(0x2b, 0x30, 0x3a),
+                text: Rgba::opaque(0xe7, 0xe9, 0xee),
+                text_muted: Rgba::opaque(0x7c, 0x82, 0x8e),
+                text_secondary: Rgba::opaque(0x9a, 0xa0, 0xac),
+                warn: Rgba::opaque(0xc9, 0x88, 0x62),
+                surface: Rgba::opaque(0x19, 0x1c, 0x22),
+                tint: Rgba::opaque(0xe7, 0xe9, 0xee).with_alpha(TINT_ALPHA),
+            },
+            Theme::Light => Self {
+                grid: Rgba::opaque(0xe4, 0xe2, 0xdc),
+                axis: Rgba::opaque(0xd8, 0xd6, 0xd0),
+                text: Rgba::opaque(0x0b, 0x0b, 0x0b),
+                text_muted: Rgba::opaque(0x6b, 0x69, 0x63),
+                text_secondary: Rgba::opaque(0x52, 0x51, 0x4e),
+                warn: Rgba::opaque(0xa1, 0x5b, 0x2e),
+                surface: Rgba::opaque(0xff, 0xff, 0xff),
+                tint: Rgba::opaque(0x0b, 0x0b, 0x0b).with_alpha(TINT_ALPHA),
+            },
+        }
+    }
+}
+
+/// Where a piece of text sits relative to the point it is given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlign {
+    LeftTop,
+    LeftCenter,
+    LeftBottom,
+    CenterTop,
+    CenterCenter,
+    RightCenter,
+}
+
+/// A surface that `draw` puts shapes on.
+///
+/// The window, the SVG file and a test recorder all implement this. None of them makes
+/// a drawing decision, because every position and colour arrives already chosen.
+pub trait Canvas {
+    fn rect(&mut self, rect: Rect, fill: Rgba);
+    fn line(&mut self, from: (f32, f32), to: (f32, f32), width: f32, color: Rgba);
+    fn polygon(&mut self, points: &[(f32, f32)], fill: Rgba);
+    fn polyline(&mut self, points: &[(f32, f32)], width: f32, color: Rgba);
+    fn text(&mut self, at: (f32, f32), align: TextAlign, text: &str, size: f32, color: Rgba);
+}
+
+const BAND_ALPHA: u8 = 42;
+const TINT_ALPHA: u8 = 12;
+const LINE_WIDTH: f32 = 2.0;
+const HAIRLINE: f32 = 1.0;
+const TICK_SIZE: f32 = 10.0;
+const LABEL_SIZE: f32 = 11.0;
+const WHOLE_CLIP_SIZE: f32 = 13.0;
+const MESSAGE_SIZE: f32 = 12.5;
+
+const NO_SERIES_MESSAGE: &str = "No finite value to draw. A file measured against itself does this.";
+const WHOLE_CLIP_MESSAGE: &str = "One score for the whole clip. This metric has no per-frame series.";
+
+/// Draws one scene, with its top left corner at `origin`.
+///
+/// This is the only walk of a `Scene` in the whole tool. The screen and the exported
+/// file go through it together, which is what stops the two pictures drifting apart.
+pub fn draw(scene: &Scene, chrome: &Chrome, origin: (f32, f32), canvas: &mut dyn Canvas) {
+    let at = |x: f32, y: f32| (origin.0 + x, origin.1 + y);
+    let plot = &scene.plot;
+
+    canvas.rect(
+        Rect {
+            x: origin.0 + scene.bad_tint.x,
+            y: origin.1 + scene.bad_tint.y,
+            w: scene.bad_tint.w,
+            h: scene.bad_tint.h,
+        },
+        chrome.tint,
+    );
+
+    for tick in &scene.y_ticks {
+        canvas.line(
+            at(plot.x, tick.y),
+            at(plot.right(), tick.y),
+            HAIRLINE,
+            chrome.grid,
+        );
+        canvas.text(
+            at(plot.x - 8.0, tick.y),
+            TextAlign::RightCenter,
+            &tick.text,
+            LABEL_SIZE,
+            chrome.text_muted,
+        );
+    }
+
+    for tick in &scene.x_ticks {
+        canvas.line(
+            at(tick.x, plot.y),
+            at(tick.x, plot.bottom()),
+            HAIRLINE,
+            chrome.grid,
+        );
+        canvas.text(
+            at(tick.x, plot.bottom() + 4.0),
+            TextAlign::CenterTop,
+            &tick.frame_text,
+            TICK_SIZE,
+            chrome.text_muted,
+        );
+        canvas.text(
+            at(tick.x, plot.bottom() + 17.0),
+            TextAlign::CenterTop,
+            &tick.time_text,
+            TICK_SIZE,
+            chrome.text_muted,
+        );
+    }
+
+    canvas.line(
+        at(plot.x, plot.y),
+        at(plot.x, plot.bottom()),
+        HAIRLINE,
+        chrome.axis,
+    );
+    canvas.line(
+        at(plot.x, plot.bottom()),
+        at(plot.right(), plot.bottom()),
+        HAIRLINE,
+        chrome.axis,
+    );
+
+    let direction = scene.metric.def().direction;
+    canvas.text(
+        at(plot.x, plot.y - 4.0),
+        TextAlign::LeftBottom,
+        direction.label(),
+        LABEL_SIZE,
+        if direction == Direction::LowerIsBetter {
+            chrome.warn
+        } else {
+            chrome.text_muted
+        },
+    );
+
+    match &scene.body {
+        Body::Lines(shapes) => {
+            for shape in shapes {
+                draw_band(canvas, shape, origin);
+                draw_mean(canvas, shape, origin);
+                if let Some(label) = &shape.end_label {
+                    canvas.text(
+                        at(label.x, label.y),
+                        TextAlign::LeftCenter,
+                        &label.text,
+                        LABEL_SIZE,
+                        Rgba::of(shape.color, 255),
+                    );
+                }
+            }
+        }
+        Body::WholeClip(values) => {
+            let mut y = plot.y + 8.0;
+            for entry in values {
+                canvas.text(
+                    at(plot.x + 8.0, y),
+                    TextAlign::LeftTop,
+                    &format!("{}  {:.3}", entry.name, entry.value),
+                    WHOLE_CLIP_SIZE,
+                    Rgba::of(entry.color, 255),
+                );
+                y += 20.0;
+            }
+            canvas.text(
+                at(plot.x + 8.0, plot.bottom() - 8.0),
+                TextAlign::LeftBottom,
+                WHOLE_CLIP_MESSAGE,
+                LABEL_SIZE,
+                chrome.text_muted,
+            );
+        }
+        Body::NothingToDraw => {
+            canvas.text(
+                at(plot.x + plot.w / 2.0, plot.y + plot.h / 2.0),
+                TextAlign::CenterCenter,
+                NO_SERIES_MESSAGE,
+                MESSAGE_SIZE,
+                chrome.text_muted,
+            );
+        }
+    }
+
+    if let Some(x) = scene.crosshair_x {
+        canvas.line(
+            at(x, plot.y),
+            at(x, plot.bottom()),
+            HAIRLINE,
+            chrome.text_secondary,
+        );
+    }
+}
+
+fn draw_band(canvas: &mut dyn Canvas, shape: &SeriesShape, origin: (f32, f32)) {
+    if shape.columns.len() < 2 {
+        return;
+    }
+    let mut points: Vec<(f32, f32)> = shape
+        .columns
+        .iter()
+        .map(|column| (origin.0 + column.x, origin.1 + column.max))
+        .collect();
+    points.extend(
+        shape
+            .columns
+            .iter()
+            .rev()
+            .map(|column| (origin.0 + column.x, origin.1 + column.min)),
+    );
+    canvas.polygon(&points, Rgba::of(shape.color, BAND_ALPHA));
+}
+
+fn draw_mean(canvas: &mut dyn Canvas, shape: &SeriesShape, origin: (f32, f32)) {
+    let points: Vec<(f32, f32)> = shape
+        .columns
+        .iter()
+        .map(|column| (origin.0 + column.x, origin.1 + column.mean))
+        .collect();
+    let color = Rgba::of(shape.color, 255);
+    if shape.dash.is_empty() {
+        canvas.polyline(&points, LINE_WIDTH, color);
+        return;
+    }
+    for [from, to] in dashes(&points, shape.dash) {
+        canvas.line(from, to, LINE_WIDTH, color);
+    }
+}
+
+/// Cuts a polyline into the drawn parts of a dash pattern.
+///
+/// Neither an `egui` stroke nor a plain SVG stroke can express the multi-segment
+/// patterns the palette carries, so the line is measured along its own length and split
+/// here. Both renderers use this, which is why a dashed line breaks in the same places
+/// on screen and in a file. The pattern alternates: the first length is drawn, the
+/// second is a gap, and so on, repeating.
+pub fn dashes(points: &[(f32, f32)], pattern: &[f32]) -> Vec<[(f32, f32); 2]> {
+    let mut segments = Vec::new();
+    if points.len() < 2 || pattern.is_empty() {
+        return segments;
+    }
+    let mut step = 0usize;
+    let mut left = pattern[0];
+    let mut drawing = true;
+
+    for pair in points.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        let length = ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt();
+        if length <= f32::EPSILON {
+            continue;
+        }
+        let direction = ((to.0 - from.0) / length, (to.1 - from.1) / length);
+        let along = |distance: f32| {
+            (
+                from.0 + direction.0 * distance,
+                from.1 + direction.1 * distance,
+            )
+        };
+        let mut done = 0.0f32;
+
+        while done < length {
+            let take = left.min(length - done);
+            if drawing {
+                segments.push([along(done), along(done + take)]);
+            }
+            done += take;
+            left -= take;
+            if left <= f32::EPSILON {
+                step = (step + 1) % pattern.len();
+                left = pattern[step];
+                drawing = !drawing;
+            }
+        }
+    }
+    segments
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,5 +1313,102 @@ mod tests {
             assert!(column.x >= plot.x && column.x <= plot.right());
             assert!(column.max >= plot.y - 0.01 && column.min <= plot.bottom() + 0.01);
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingCanvas {
+        ops: Vec<String>,
+    }
+
+    impl Canvas for RecordingCanvas {
+        fn rect(&mut self, rect: Rect, _fill: Rgba) {
+            self.ops.push(format!("rect {:.1} {:.1}", rect.x, rect.y));
+        }
+
+        fn line(&mut self, from: (f32, f32), _to: (f32, f32), _width: f32, _color: Rgba) {
+            self.ops.push(format!("line {:.1} {:.1}", from.0, from.1));
+        }
+
+        fn polygon(&mut self, points: &[(f32, f32)], _fill: Rgba) {
+            self.ops.push(format!("polygon {}", points.len()));
+        }
+
+        fn polyline(&mut self, points: &[(f32, f32)], _width: f32, _color: Rgba) {
+            self.ops.push(format!("polyline {}", points.len()));
+        }
+
+        fn text(&mut self, at: (f32, f32), _align: TextAlign, text: &str, _size: f32, _color: Rgba) {
+            self.ops.push(format!("text {:.1} {:.1} {text}", at.0, at.1));
+        }
+    }
+
+    fn record(scene: &Scene, origin: (f32, f32)) -> Vec<String> {
+        let mut canvas = RecordingCanvas::default();
+        draw(scene, &Chrome::for_theme(Theme::Dark), origin, &mut canvas);
+        canvas.ops
+    }
+
+    #[test]
+    fn the_walk_draws_the_tint_the_grid_the_axes_the_band_and_the_line() {
+        let values: Vec<f32> = (0..400).map(|index| 30.0 + (index % 7) as f32).collect();
+        let series = [input(1, 0, "encode.mp4", &values)];
+        let scenes = build_scenes(&request(MetricId::PsnrY, &series));
+
+        let ops = record(&scenes[0], (0.0, 0.0));
+
+        assert_eq!(ops.iter().filter(|op| op.starts_with("rect")).count(), 1);
+        assert_eq!(ops.iter().filter(|op| op.starts_with("polygon")).count(), 1);
+        assert_eq!(ops.iter().filter(|op| op.starts_with("polyline")).count(), 1);
+        assert!(ops.iter().any(|op| op.contains("higher is better")));
+        assert!(ops.iter().filter(|op| op.starts_with("line")).count() > 2);
+    }
+
+    #[test]
+    fn a_scene_drawn_at_an_offset_moves_every_shape_by_that_offset() {
+        let values: Vec<f32> = (0..80).map(|index| 30.0 + (index % 5) as f32).collect();
+        let series = [input(1, 0, "encode.mp4", &values)];
+        let scenes = build_scenes(&request(MetricId::PsnrY, &series));
+
+        let at_origin = record(&scenes[0], (0.0, 0.0));
+        let moved = record(&scenes[0], (10.0, 20.0));
+        let tint = scenes[0].bad_tint;
+
+        assert_eq!(at_origin.len(), moved.len());
+        assert_eq!(at_origin[0], format!("rect {:.1} {:.1}", tint.x, tint.y));
+        assert_eq!(
+            moved[0],
+            format!("rect {:.1} {:.1}", tint.x + 10.0, tint.y + 20.0)
+        );
+    }
+
+    #[test]
+    fn a_dashed_series_becomes_line_segments_and_never_one_polyline() {
+        // Slot zero is solid on purpose, so a dash pattern needs any other slot.
+        let values: Vec<f32> = (0..400).map(|index| 30.0 + (index % 7) as f32).collect();
+        let series = [input(1, 1, "encode.mp4", &values)];
+        let mut high_contrast = request(MetricId::PsnrY, &series);
+        high_contrast.high_contrast = true;
+
+        let solid = record(&build_scenes(&request(MetricId::PsnrY, &series))[0], (0.0, 0.0));
+        let dashed = record(&build_scenes(&high_contrast)[0], (0.0, 0.0));
+
+        assert_eq!(solid.iter().filter(|op| op.starts_with("polyline")).count(), 1);
+        assert_eq!(dashed.iter().filter(|op| op.starts_with("polyline")).count(), 0);
+        assert!(
+            dashed.iter().filter(|op| op.starts_with("line")).count()
+                > solid.iter().filter(|op| op.starts_with("line")).count()
+        );
+    }
+
+    #[test]
+    fn a_low_is_better_metric_draws_its_tint_at_the_top() {
+        let values: Vec<f32> = (0..80).map(|index| (index % 12) as f32).collect();
+        let series = [input(1, 0, "encode.mp4", &values)];
+        let scenes = build_scenes(&request(MetricId::Cambi, &series));
+
+        let ops = record(&scenes[0], (0.0, 0.0));
+
+        assert_eq!(ops[0], "rect 50.0 16.0");
+        assert!(ops.iter().any(|op| op.contains("lower is better")));
     }
 }
