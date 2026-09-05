@@ -23,3 +23,6 @@ target
 
 # rustc will dump stack traces when hitting an internal compiler error to PWD
 rustc-ice-*.txt
+
+# The engineering log. It is not part of the release.
+/NOTES.md
