@@ -54,6 +54,9 @@ pub enum SupervisorEvent {
         encode: FileId,
         metric: MetricId,
         pooled: Pooled,
+        /// Every per-frame value, in frame order. The plot draws these, so they travel
+        /// with the pooled record rather than being parsed a second time.
+        series: Vec<f32>,
     },
     EncodeDone {
         encode: FileId,
@@ -196,11 +199,12 @@ fn run_one(item: &WorkItem, runner: &dyn ProcessRunner, sender: &Sender<Supervis
     for artifact in &item.invocation.expects {
         for metric in artifact.metrics.iter().copied() {
             match read_pooled(artifact, metric) {
-                Ok(Some(pooled)) => {
+                Ok(Some((pooled, series))) => {
                     let _ = sender.send(SupervisorEvent::MetricReady {
                         encode,
                         metric,
                         pooled,
+                        series,
                     });
                 }
                 Ok(None) => {}
@@ -215,12 +219,12 @@ fn run_one(item: &WorkItem, runner: &dyn ProcessRunner, sender: &Sender<Supervis
 fn read_pooled(
     artifact: &vqa_core::backend::LogArtifact,
     metric: MetricId,
-) -> Result<Option<Pooled>, String> {
+) -> Result<Option<(Pooled, Vec<f32>)>, String> {
     let file = std::fs::File::open(&artifact.path).map_err(|error| error.to_string())?;
     let mut sink = BufferSink::default();
     parse_stats_file(BufReader::new(file), artifact.format, metric, &mut sink)
         .map_err(|error| error.to_string())?;
-    Ok(pool(&sink.values, metric.def().harmonic_mean))
+    Ok(pool(&sink.values, metric.def().harmonic_mean).map(|pooled| (pooled, sink.values)))
 }
 
 #[cfg(test)]

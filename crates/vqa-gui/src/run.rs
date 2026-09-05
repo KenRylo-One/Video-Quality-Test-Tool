@@ -13,9 +13,18 @@ pub struct RunState {
     receiver: Receiver<SupervisorEvent>,
     encodes_remaining: usize,
     pub results: HashMap<(FileId, MetricId), Pooled>,
+    /// Every per-frame value, for the plot.
+    ///
+    /// The worst realistic case is one hour at 60 fps, eight encodes and six metrics,
+    /// which is about 41 MB. That sits well inside the 300 MB the design allows.
+    pub series: HashMap<(FileId, MetricId), Vec<f32>>,
     pub failures: Vec<String>,
     /// Every correction and note for this run, as one flat, ready-to-show list.
     pub notes: Vec<String>,
+    /// The absolute frame number that sample zero of every series holds. The plot's
+    /// horizontal axis reads real frame numbers, not offsets into a clamped range.
+    pub first_frame: u64,
+    pub frame_rate: vqa_core::media::Rational,
 }
 
 impl RunState {
@@ -143,8 +152,11 @@ impl RunState {
             receiver,
             encodes_remaining,
             results: HashMap::new(),
+            series: HashMap::new(),
             failures: Vec::new(),
             notes,
+            first_frame: frame_range.map_or(0, |(first, _)| first),
+            frame_rate: reference.info.frame_rate,
         })
     }
 
@@ -158,8 +170,10 @@ impl RunState {
                     encode,
                     metric,
                     pooled,
+                    series,
                 } => {
                     self.results.insert((encode, metric), pooled);
+                    self.series.insert((encode, metric), series);
                 }
                 SupervisorEvent::EncodeDone { .. } => {
                     self.encodes_remaining = self.encodes_remaining.saturating_sub(1);
@@ -183,8 +197,11 @@ impl RunState {
             receiver,
             encodes_remaining,
             results: HashMap::new(),
+            series: HashMap::new(),
             failures: Vec::new(),
             notes: Vec::new(),
+            first_frame: 0,
+            frame_rate: vqa_core::media::Rational { num: 25, den: 1 },
         }
     }
 }
@@ -206,6 +223,7 @@ mod tests {
                 encode: FileId(1),
                 metric: MetricId::PsnrY,
                 pooled,
+                series: vec![1.0],
             })
             .unwrap();
         sender
@@ -214,6 +232,32 @@ mod tests {
 
         assert!(state.poll());
         assert!(state.is_running());
+    }
+
+    #[test]
+    fn a_finished_metric_leaves_its_per_frame_series_behind_for_the_plot() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let mut state = RunState::for_test(1, receiver);
+
+        let values = vec![40.0f32, 41.0, 42.0];
+        let pooled = pool(&values, HarmonicMean::Allowed).unwrap();
+        sender
+            .send(SupervisorEvent::MetricReady {
+                encode: FileId(7),
+                metric: MetricId::PsnrY,
+                pooled,
+                series: values.clone(),
+            })
+            .unwrap();
+        sender
+            .send(SupervisorEvent::EncodeDone { encode: FileId(7) })
+            .unwrap();
+        state.poll();
+
+        assert_eq!(
+            state.series.get(&(FileId(7), MetricId::PsnrY)),
+            Some(&values)
+        );
     }
 
     #[test]
