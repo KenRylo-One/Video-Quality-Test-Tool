@@ -2955,7 +2955,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "vqa-backends"
+name = "vqtt-backends"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -2963,11 +2963,11 @@ dependencies = [
  "sha2",
  "thiserror 2.0.20",
  "tracing",
- "vqa-core",
+ "vqtt-core",
 ]
 
 [[package]]
-name = "vqa-core"
+name = "vqtt-core"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -2975,7 +2975,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vqa-gui"
+name = "vqtt-gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -2986,13 +2986,13 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
- "vqa-backends",
- "vqa-core",
- "vqa-run",
+ "vqtt-backends",
+ "vqtt-core",
+ "vqtt-run",
 ]
 
 [[package]]
-name = "vqa-run"
+name = "vqtt-run"
 version = "0.1.0"
 dependencies = [
  "directories",
@@ -3003,8 +3003,8 @@ dependencies = [
  "time",
  "toml",
  "tracing",
- "vqa-backends",
- "vqa-core",
+ "vqtt-backends",
+ "vqtt-core",
 ]
 
 [[package]]

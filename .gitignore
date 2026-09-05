@@ -4,8 +4,8 @@
 .idea/
 .vscode/
 *.log
-# Real fixture data, not a debug log. include_str!() by crates/vqa-backends/src/parse/stats_file.rs.
-!crates/vqa-backends/tests/fixtures/*.log
+# Real fixture data, not a debug log. include_str!() by crates/vqtt-backends/src/parse/stats_file.rs.
+!crates/vqtt-backends/tests/fixtures/*.log
 
 # will have compiled files and executables
 debug

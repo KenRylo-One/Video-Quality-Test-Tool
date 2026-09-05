@@ -1,0 +1,1352 @@
+use std::ffi::OsString;
+use std::path::PathBuf;
+use vqtt_core::backend::{Invocation, LogArtifact, LogFormat, MeasureJob};
+use vqtt_core::capability::{BinaryId, LaneKind};
+use vqtt_core::corrections::{self, CorrectionDetail, CorrectionId, DetectedCorrections};
+use vqtt_core::media::Rational;
+use vqtt_core::metric::MetricId;
+
+const FFMPEG_FAMILY: [MetricId; 3] = [MetricId::PsnrY, MetricId::SsimAll, MetricId::XpsnrMin];
+
+/// The metrics that ride on a VMAF v1 model, fused into the same pass as the model
+/// they need chosen for them.
+const VMAF_V1_GROUP: [MetricId; 2] = [MetricId::Vmaf, MetricId::VmafV1Cambi];
+
+/// Metrics that attach as an extra `feature=` clause onto whichever base pass runs, or
+/// get their own pass with the default model when no base pass is ticked. Each one
+/// names its own `libvmaf` feature key.
+const LIBVMAF_EXTRA_FEATURES: [(MetricId, &str); 4] = [
+    (MetricId::Cambi, "cambi"),
+    (MetricId::PsnrHvs, "psnr_hvs"),
+    (MetricId::Ciede2000, "ciede"),
+    (MetricId::MsSsim, "float_ms_ssim"),
+];
+
+/// Every metric this file can build a `libvmaf` invocation for.
+const LIBVMAF_FAMILY: [MetricId; 8] = [
+    MetricId::Vmaf,
+    MetricId::VmafV0,
+    MetricId::VmafNegV0,
+    MetricId::Cambi,
+    MetricId::VmafV1Cambi,
+    MetricId::PsnrHvs,
+    MetricId::Ciede2000,
+    MetricId::MsSsim,
+];
+
+/// Which corrections `plan()` is allowed to apply to the filter graph.
+///
+/// For tests only. `plan()` always uses `CorrectionToggles::default()`. No setting, no
+/// preset and no interface control ever builds one of these by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorrectionToggles {
+    pub color_range: bool,
+    pub resolution: bool,
+    pub frame_count: bool,
+}
+
+impl Default for CorrectionToggles {
+    fn default() -> Self {
+        Self {
+            color_range: true,
+            resolution: true,
+            frame_count: true,
+        }
+    }
+}
+
+pub fn plan(job: &MeasureJob) -> vqtt_core::Result<Vec<Invocation>> {
+    plan_with_toggles(job, CorrectionToggles::default())
+}
+
+/// For tests only. See `CorrectionToggles`.
+pub fn plan_with_toggles(
+    job: &MeasureJob,
+    toggles: CorrectionToggles,
+) -> vqtt_core::Result<Vec<Invocation>> {
+    let metrics: Vec<MetricId> = FFMPEG_FAMILY
+        .iter()
+        .copied()
+        .filter(|metric| job.metrics.contains(metric))
+        .collect();
+    let libvmaf_metrics: Vec<MetricId> = LIBVMAF_FAMILY
+        .iter()
+        .copied()
+        .filter(|metric| job.metrics.contains(metric))
+        .collect();
+
+    if metrics.is_empty() && libvmaf_metrics.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let target_label = job.encode.info.file_name();
+    let mut detected = corrections::detect_all(
+        &job.reference.info,
+        &job.encode.info,
+        &target_label,
+        None,
+        &job.metrics,
+        &job.vmaf_models,
+        job.vmaf_viewing_distance,
+    );
+    apply_toggles(&mut detected, toggles);
+    let frame_range = job.frame_range.or(detected.frame_range);
+
+    let mut invocations = Vec::new();
+
+    if !metrics.is_empty() {
+        // The real `xpsnr` filter divides by zero when its input arrives through a
+        // `split` copy instead of straight off the correction chain, verified against
+        // a real ffmpeg build. `xpsnr` never rides in the fused, `split`-based pass.
+        let fusable: Vec<MetricId> = metrics
+            .iter()
+            .copied()
+            .filter(|metric| *metric != MetricId::XpsnrMin)
+            .collect();
+
+        if !fusable.is_empty() {
+            if job.fused_passes {
+                invocations.push(fused(job, &fusable, &detected, frame_range));
+            } else {
+                invocations.extend(
+                    fusable
+                        .iter()
+                        .map(|metric| separate(job, *metric, &detected, frame_range)),
+                );
+            }
+        }
+        if metrics.contains(&MetricId::XpsnrMin) {
+            invocations.push(separate(job, MetricId::XpsnrMin, &detected, frame_range));
+        }
+    }
+
+    invocations.extend(libvmaf_invocations(
+        job,
+        &libvmaf_metrics,
+        &detected,
+        frame_range,
+    ));
+
+    Ok(invocations)
+}
+
+/// How far before the wanted frame the extraction seeks.
+///
+/// An input seek lands on the keyframe at or before the time it is given, and then the
+/// filter takes the first frame at or after the real target. Two seconds clears a
+/// normal keyframe interval without decoding much.
+const SEEK_LEAD_S: f64 = 2.0;
+
+/// The three images one frame is shown as.
+pub struct FrameExtract {
+    pub reference: Invocation,
+    pub encode: Invocation,
+    /// Reads the two PNG files above, so a new gain costs no video decode.
+    pub difference: Invocation,
+    pub reference_path: PathBuf,
+    pub encode_path: PathBuf,
+    pub difference_path: PathBuf,
+}
+
+/// Builds the commands that write one frame three ways.
+///
+/// The encode goes through the same correction chain the measurement used, so the
+/// picture is the one that was scored and not the one on disk. The reference is never
+/// scaled and never range converted, which is the rule the whole correction design
+/// rests on.
+pub fn plan_frame_extract(
+    job: &MeasureJob,
+    frame: u64,
+    gain: u32,
+) -> vqtt_core::Result<FrameExtract> {
+    let target_label = job.encode.info.file_name();
+    let detected = corrections::detect_all(
+        &job.reference.info,
+        &job.encode.info,
+        &target_label,
+        None,
+        &job.metrics,
+        &job.vmaf_models,
+        job.vmaf_viewing_distance,
+    );
+
+    let seconds = frame_seconds(frame, job.reference.info.frame_rate);
+    let aim = select_seconds(frame, job.reference.info.frame_rate);
+    let reference_path = job.work_dir.join(format!("f{frame}_ref.png"));
+    let encode_path = job.work_dir.join(format!("f{frame}_enc.png"));
+    let difference_path = job.work_dir.join(format!("f{frame}_diff_x{gain}.png"));
+
+    let encode_chain = distorted_chain(job, &detected, None);
+
+    Ok(FrameExtract {
+        reference: still_invocation(
+            &job.reference.path,
+            seconds,
+            &select_clause(aim),
+            &reference_path,
+        ),
+        encode: still_invocation(
+            &job.encode.path,
+            seconds,
+            &format!("{},{}", select_clause(aim), encode_chain),
+            &encode_path,
+        ),
+        difference: difference_invocation(&reference_path, &encode_path, gain, &difference_path),
+        reference_path,
+        encode_path,
+        difference_path,
+    })
+}
+
+/// Where one frame starts, in seconds.
+///
+/// A zero frame rate gives zero, and the extraction reads the first frame rather than
+/// refusing to run.
+fn frame_seconds(frame: u64, rate: Rational) -> f64 {
+    if rate.num == 0 || rate.den == 0 {
+        return 0.0;
+    }
+    frame as f64 * rate.den as f64 / rate.num as f64
+}
+
+/// What `select` aims at to land on this frame and no other.
+///
+/// `select` compares against the frame's own start time, so the target must sit above
+/// the frame before and no higher than this one. Half a frame earlier is the middle of
+/// that gap, and it is what makes the aim survive being printed with six decimal
+/// places: frame 149 at 30 fps starts at 4.9666666, which prints as 4.966667, and a
+/// `gte` against that number matches nothing at all. The last frame of a file then
+/// writes no image and reports no error. Measured against the real binary on `TEST_A`.
+fn select_seconds(frame: u64, rate: Rational) -> f64 {
+    if rate.num == 0 || rate.den == 0 {
+        return 0.0;
+    }
+    ((frame as f64 - 0.5) * rate.den as f64 / rate.num as f64).max(0.0)
+}
+
+/// Takes the first frame at or after the target time.
+///
+/// The `select` filter counts `n` from the first frame the seek delivered, not from the
+/// start of the file, so an absolute frame number cannot be used after an input seek.
+/// An absolute timestamp can be, but only with `-copyts`. See `still_invocation`.
+fn select_clause(seconds: f64) -> String {
+    format!("select='gte(t\\,{seconds:.6})'")
+}
+
+fn still_invocation(
+    input: &std::path::Path,
+    seconds: f64,
+    filter: &str,
+    output: &std::path::Path,
+) -> Invocation {
+    let seek = (seconds - SEEK_LEAD_S).max(0.0);
+    Invocation {
+        program: PathBuf::from("ffmpeg"),
+        args: vec![
+            OsString::from("-y"),
+            OsString::from("-v"),
+            OsString::from("error"),
+            // An input seek restarts the timestamps at zero, so without this the target
+            // would point at a frame two seconds past the wanted one. Measured against
+            // the real binary: after `-ss 2.95` the first frame reports 0.0166667, and
+            // with `-copyts` it reports 2.966667.
+            OsString::from("-copyts"),
+            OsString::from("-ss"),
+            OsString::from(format!("{seek:.6}")),
+            OsString::from("-i"),
+            input.as_os_str().to_os_string(),
+            OsString::from("-vf"),
+            OsString::from(filter),
+            OsString::from("-frames:v"),
+            OsString::from("1"),
+            OsString::from("-update"),
+            OsString::from("1"),
+            output.as_os_str().to_os_string(),
+        ],
+        env: Vec::new(),
+        cwd: None,
+        expects: Vec::new(),
+        lane: LaneKind::Cpu,
+        binary: BinaryId::Ffmpeg,
+    }
+}
+
+/// The absolute difference of the two stills, multiplied by the gain and clipped.
+///
+/// A difference at a gain of one is invisible for a small error, so the viewer needs
+/// the multiply. This is a viewing aid and never a measurement.
+fn difference_invocation(
+    reference: &std::path::Path,
+    encode: &std::path::Path,
+    gain: u32,
+    output: &std::path::Path,
+) -> Invocation {
+    let gain = gain.max(1);
+    Invocation {
+        program: PathBuf::from("ffmpeg"),
+        args: vec![
+            OsString::from("-y"),
+            OsString::from("-v"),
+            OsString::from("error"),
+            OsString::from("-i"),
+            reference.as_os_str().to_os_string(),
+            OsString::from("-i"),
+            encode.as_os_str().to_os_string(),
+            OsString::from("-lavfi"),
+            OsString::from(format!(
+                "[0:v][1:v]blend=all_mode=difference,format=gbrp,\
+lutrgb=r='clip(val*{gain},0,255)':g='clip(val*{gain},0,255)':b='clip(val*{gain},0,255)'"
+            )),
+            OsString::from("-frames:v"),
+            OsString::from("1"),
+            OsString::from("-update"),
+            OsString::from("1"),
+            output.as_os_str().to_os_string(),
+        ],
+        env: Vec::new(),
+        cwd: None,
+        expects: Vec::new(),
+        lane: LaneKind::Cpu,
+        binary: BinaryId::Ffmpeg,
+    }
+}
+
+/// Drops a detected correction that a test asked to disable, and drops the frame range
+/// that came from it, so the toggle really turns the correction off.
+fn apply_toggles(detected: &mut DetectedCorrections, toggles: CorrectionToggles) {
+    if !toggles.color_range {
+        detected
+            .corrections
+            .retain(|correction| correction.id != CorrectionId::ColorRange);
+    }
+    if !toggles.resolution {
+        detected
+            .corrections
+            .retain(|correction| correction.id != CorrectionId::Resolution);
+    }
+    if !toggles.frame_count {
+        detected
+            .corrections
+            .retain(|correction| correction.id != CorrectionId::FrameCount);
+        detected.frame_range = None;
+    }
+}
+
+fn separate(
+    job: &MeasureJob,
+    metric: MetricId,
+    detected: &DetectedCorrections,
+    frame_range: Option<(u64, u64)>,
+) -> Invocation {
+    let stats_path = job.work_dir.join(log_file_name(metric));
+    let format = log_format_of(metric);
+
+    let distorted_pad = "distorted_pad";
+    let reference_pad = "reference_pad";
+    let mut distorted = distorted_chain(job, detected, frame_range);
+    let mut reference = reference_chain(frame_range);
+    if metric == MetricId::XpsnrMin {
+        // The real `setpts` filter does not carry the frame rate onto its output link
+        // on this ffmpeg build, and `xpsnr` divides by that frame rate during its own
+        // init, crashing with SIGFPE. An `fps` filter placed right after `setpts` puts
+        // a concrete rate back on the link. Verified against the real binary: for a
+        // constant frame rate input that already matches, `fps` here changes no frame
+        // count. A variable frame rate input has not been verified against this fix.
+        distorted.push_str(&xpsnr_frame_rate_clause(job.encode.info.frame_rate));
+        reference.push_str(&xpsnr_frame_rate_clause(job.reference.info.frame_rate));
+    }
+    let reset_distorted = format!("[0:v]{distorted}[{distorted_pad}]");
+    let reset_reference = format!("[1:v]{reference}[{reference_pad}]");
+    let branch = filter_branch(metric, distorted_pad, reference_pad, &stats_path);
+
+    let filter_graph = if metric == MetricId::XpsnrMin {
+        format!("{reset_reference};{reset_distorted};{branch}")
+    } else {
+        format!("{reset_distorted};{reset_reference};{branch}")
+    };
+
+    Invocation {
+        program: PathBuf::from("ffmpeg"),
+        args: ffmpeg_args(&job.encode.path, &job.reference.path, &filter_graph),
+        env: Vec::new(),
+        cwd: None,
+        expects: vec![LogArtifact {
+            path: stats_path,
+            format,
+            metrics: vec![metric],
+        }],
+        lane: LaneKind::Cpu,
+        binary: BinaryId::Ffmpeg,
+    }
+}
+
+fn fused(
+    job: &MeasureJob,
+    metrics: &[MetricId],
+    detected: &DetectedCorrections,
+    frame_range: Option<(u64, u64)>,
+) -> Invocation {
+    let count = metrics.len();
+    let distorted_pads: Vec<String> = (0..count)
+        .map(|index| format!("distorted{index}"))
+        .collect();
+    let reference_pads: Vec<String> = (0..count)
+        .map(|index| format!("reference{index}"))
+        .collect();
+
+    let mut filter_graph = format!(
+        "[0:v]{},split={count}[{}];[1:v]{},split={count}[{}]",
+        distorted_chain(job, detected, frame_range),
+        distorted_pads.join("]["),
+        reference_chain(frame_range),
+        reference_pads.join("]["),
+    );
+
+    let mut expects = Vec::with_capacity(count);
+    for (index, metric) in metrics.iter().enumerate() {
+        let stats_path = job.work_dir.join(log_file_name(*metric));
+        filter_graph.push(';');
+        filter_graph.push_str(&filter_branch(
+            *metric,
+            &distorted_pads[index],
+            &reference_pads[index],
+            &stats_path,
+        ));
+        expects.push(LogArtifact {
+            path: stats_path,
+            format: log_format_of(*metric),
+            metrics: vec![*metric],
+        });
+    }
+
+    Invocation {
+        program: PathBuf::from("ffmpeg"),
+        args: ffmpeg_args(&job.encode.path, &job.reference.path, &filter_graph),
+        env: Vec::new(),
+        cwd: None,
+        expects,
+        lane: LaneKind::Cpu,
+        binary: BinaryId::Ffmpeg,
+    }
+}
+
+/// Metrics that can safely ride as a `feature=` extra on a pass that already runs a
+/// VMAF v1 model. Standalone CAMBI is deliberately excluded: a v1 model already
+/// computes its own embedded CAMBI at a different speedup, and the two must never
+/// share a graph or a CSV column.
+const V1_SAFE_EXTRA_FEATURES: [MetricId; 3] =
+    [MetricId::PsnrHvs, MetricId::Ciede2000, MetricId::MsSsim];
+
+/// Builds one `libvmaf` invocation for each group of metrics that cannot share a
+/// pass with another group. A VMAF v1 score and its embedded CAMBI number always
+/// share a model, so they share a pass. `VmafV0` and `VmafNegV0` each need their own
+/// model options, so each gets its own pass. Standalone CAMBI always gets its own
+/// pass, since a v1 model run already carries a different CAMBI number of its own.
+/// Every remaining feature attaches to the v1 pass when it runs, or gets one pass of
+/// its own with the FFmpeg default model when it does not.
+fn libvmaf_invocations(
+    job: &MeasureJob,
+    ticked: &[MetricId],
+    detected: &DetectedCorrections,
+    frame_range: Option<(u64, u64)>,
+) -> Vec<Invocation> {
+    let mut invocations = Vec::new();
+
+    let v1_metrics: Vec<MetricId> = VMAF_V1_GROUP
+        .iter()
+        .copied()
+        .filter(|id| ticked.contains(id))
+        .collect();
+    let mut v1_safe_extras: Vec<MetricId> = V1_SAFE_EXTRA_FEATURES
+        .iter()
+        .copied()
+        .filter(|id| ticked.contains(id))
+        .collect();
+
+    if !v1_metrics.is_empty() {
+        if let Some(invocation) = libvmaf_pass(
+            job,
+            &v1_metrics,
+            &std::mem::take(&mut v1_safe_extras),
+            detected,
+            frame_range,
+            "vmaf_v1",
+        ) {
+            invocations.push(invocation);
+        }
+    }
+
+    if ticked.contains(&MetricId::VmafV0) {
+        if let Some(invocation) = libvmaf_pass(
+            job,
+            &[MetricId::VmafV0],
+            &[],
+            detected,
+            frame_range,
+            "vmaf_v0",
+        ) {
+            invocations.push(invocation);
+        }
+    }
+
+    if ticked.contains(&MetricId::VmafNegV0) {
+        if let Some(invocation) = libvmaf_pass(
+            job,
+            &[MetricId::VmafNegV0],
+            &[],
+            detected,
+            frame_range,
+            "vmaf_neg_v0",
+        ) {
+            invocations.push(invocation);
+        }
+    }
+
+    if ticked.contains(&MetricId::Cambi) {
+        if let Some(invocation) =
+            libvmaf_pass(job, &[], &[MetricId::Cambi], detected, frame_range, "cambi")
+        {
+            invocations.push(invocation);
+        }
+    }
+
+    // v1_safe_extras is left over when no v1 pass ran to carry it.
+    if !v1_safe_extras.is_empty() {
+        if let Some(invocation) = libvmaf_pass(
+            job,
+            &[],
+            &v1_safe_extras,
+            detected,
+            frame_range,
+            "vmaf_extra",
+        ) {
+            invocations.push(invocation);
+        }
+    }
+
+    invocations
+}
+
+/// One `libvmaf` pass. `primary` names the metric or metrics that need `model=` set,
+/// at most the two members of `VMAF_V1_GROUP`, since every other primary metric runs
+/// alone. `extras` names features that attach as a `feature=` clause with no model
+/// selection of their own. Returns nothing when `primary` asks for a VMAF v1 model
+/// and none was found, since the tool never blocks a run over a missing model. It
+/// drops that metric instead.
+fn libvmaf_pass(
+    job: &MeasureJob,
+    primary: &[MetricId],
+    extras: &[MetricId],
+    detected: &DetectedCorrections,
+    frame_range: Option<(u64, u64)>,
+    file_stem: &str,
+) -> Option<Invocation> {
+    let wants_v1 = primary.iter().any(|id| VMAF_V1_GROUP.contains(id));
+    let mut cwd = None;
+    let mut model_option = String::new();
+
+    if wants_v1 {
+        let model_path = detected.corrections.iter().find_map(|correction| {
+            if correction.id != CorrectionId::VmafModel {
+                return None;
+            }
+            match &correction.detail {
+                CorrectionDetail::VmafModel { path } => Some(path.clone()),
+                _ => None,
+            }
+        })?;
+        let file_name = model_path.file_name()?.to_string_lossy().into_owned();
+        cwd = model_path.parent().map(|parent| parent.to_path_buf());
+        model_option = format!(":model=path='{file_name}'");
+    } else if primary.contains(&MetricId::VmafNegV0) {
+        // Verified against the real `ffmpeg` on this machine: a `feature=` override of
+        // `enhn_gain_limit` is rejected as an unknown top-level option, because the
+        // colon inside its value collides with the filter's own colon-separated option
+        // list. FFmpeg's own bundled NEG model avoids the whole problem.
+        model_option = ":model=version=vmaf_v0.6.1neg".to_string();
+    } else if primary.contains(&MetricId::VmafV0) {
+        model_option = ":model=version=vmaf_v0.6.1".to_string();
+    }
+
+    let cambi_size_option = detected
+        .corrections
+        .iter()
+        .find_map(|correction| match &correction.detail {
+            CorrectionDetail::CambiEncodeSize {
+                width,
+                height,
+                bit_depth,
+            } => Some(format!(
+                ":cambi.enc_width={width}:cambi.enc_height={height}:cambi.enc_bitdepth={bit_depth}"
+            )),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let extra_names: Vec<&str> = LIBVMAF_EXTRA_FEATURES
+        .iter()
+        .filter(|(id, _)| extras.contains(id))
+        .map(|(_, key)| *key)
+        .collect();
+    let extra_feature_option = if extra_names.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ":feature={}",
+            extra_names
+                .iter()
+                .map(|name| format!("name={name}"))
+                .collect::<Vec<_>>()
+                .join("|")
+        )
+    };
+
+    let needs_10bit =
+        wants_v1 || primary.contains(&MetricId::VmafV1Cambi) || extras.contains(&MetricId::Cambi);
+
+    let stats_path = job.work_dir.join(format!("{file_stem}.csv"));
+    let distorted_pad = "distorted_pad";
+    let reference_pad = "reference_pad";
+    let bit_depth_clause = if needs_10bit {
+        ",format=yuv420p10le"
+    } else {
+        ""
+    };
+    let filter_graph = format!(
+        "[0:v]{}{bit_depth_clause}[{distorted_pad}];[1:v]{}{bit_depth_clause}[{reference_pad}];[{distorted_pad}][{reference_pad}]libvmaf=log_fmt=csv:log_path={}{model_option}{cambi_size_option}{extra_feature_option}",
+        distorted_chain(job, detected, frame_range),
+        reference_chain(frame_range),
+        escape_filter_path(&stats_path),
+    );
+
+    let mut metrics: Vec<MetricId> = primary.to_vec();
+    metrics.extend(extras.iter().copied());
+
+    Some(Invocation {
+        program: PathBuf::from("ffmpeg"),
+        args: ffmpeg_args(&job.encode.path, &job.reference.path, &filter_graph),
+        env: Vec::new(),
+        cwd,
+        expects: vec![LogArtifact {
+            path: stats_path,
+            format: LogFormat::VmafCsv,
+            metrics,
+        }],
+        lane: LaneKind::Cpu,
+        binary: BinaryId::Ffmpeg,
+    })
+}
+
+/// The filter chain for the distorted input: an optional trim, always a timestamp
+/// reset, then an optional scale and an optional range conversion, in that order.
+/// Verified against the real `ffmpeg` on this machine, including the combined chain.
+fn distorted_chain(
+    job: &MeasureJob,
+    detected: &DetectedCorrections,
+    frame_range: Option<(u64, u64)>,
+) -> String {
+    let mut chain = trim_clause(frame_range);
+    chain.push_str("setpts=PTS-STARTPTS");
+
+    if detected
+        .corrections
+        .iter()
+        .any(|correction| correction.id == CorrectionId::Resolution)
+    {
+        chain.push_str(&format!(
+            ",scale={}:{}:flags=bicubic",
+            job.reference.info.width, job.reference.info.height
+        ));
+    }
+
+    if detected
+        .corrections
+        .iter()
+        .any(|correction| correction.id == CorrectionId::ColorRange)
+    {
+        let from = job
+            .encode
+            .info
+            .effective_color_range()
+            .ffmpeg_value()
+            .unwrap_or("full");
+        let to = job
+            .reference
+            .info
+            .effective_color_range()
+            .ffmpeg_value()
+            .unwrap_or("limited");
+        chain.push_str(&format!(
+            ",zscale=in_range={from}:out_range={to},format=yuv420p"
+        ));
+    }
+
+    chain
+}
+
+/// The filter chain for the reference input. The reference is never scaled and never
+/// range-converted.
+fn reference_chain(frame_range: Option<(u64, u64)>) -> String {
+    let mut chain = trim_clause(frame_range);
+    chain.push_str("setpts=PTS-STARTPTS");
+    chain
+}
+
+/// `,fps=num/den` to put a concrete frame rate back on an `xpsnr` branch after
+/// `setpts`, or an empty string when the probe read no usable rate.
+fn xpsnr_frame_rate_clause(rate: Rational) -> String {
+    if rate.num == 0 || rate.den == 0 {
+        String::new()
+    } else {
+        format!(",fps={}/{}", rate.num, rate.den)
+    }
+}
+
+/// `trim=start_frame=X:end_frame=Y,` for a range, or an empty string for the whole file.
+/// `end_frame` is the first dropped frame, so an inclusive last frame becomes `last + 1`.
+fn trim_clause(frame_range: Option<(u64, u64)>) -> String {
+    match frame_range {
+        Some((first_frame, last_frame)) => format!(
+            "trim=start_frame={first_frame}:end_frame={},",
+            last_frame + 1
+        ),
+        None => String::new(),
+    }
+}
+
+/// A path, ready to sit inside an ffmpeg filter option value. A colon separates one
+/// filter option from the next, so a Windows drive letter needs its colon escaped, and
+/// it needs two backslashes: the option-list scanner consumes one level of escaping and
+/// the value parser underneath consumes a second. Verified against a real `ffmpeg -lavfi
+/// psnr=stats_file=...` invocation, since the ffmpeg documentation states one level.
+fn escape_filter_path(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "/")
+        .replace(':', "\\\\:")
+}
+
+fn filter_branch(
+    metric: MetricId,
+    distorted_pad: &str,
+    reference_pad: &str,
+    stats_path: &std::path::Path,
+) -> String {
+    let filter_name = ffmpeg_filter_name(metric);
+    let stats_path = escape_filter_path(stats_path);
+    if metric == MetricId::XpsnrMin {
+        format!("[{reference_pad}][{distorted_pad}]{filter_name}=stats_file={stats_path}")
+    } else {
+        format!("[{distorted_pad}][{reference_pad}]{filter_name}=stats_file={stats_path}")
+    }
+}
+
+fn ffmpeg_args(
+    encode_path: &std::path::Path,
+    reference_path: &std::path::Path,
+    filter_graph: &str,
+) -> Vec<OsString> {
+    vec![
+        OsString::from("-y"),
+        OsString::from("-v"),
+        OsString::from("error"),
+        // `-v error` is quiet on purpose, so the frame counter has to be asked for.
+        // The progress blocks go to the error stream, which the supervisor already
+        // reads, and each one is a plain `key=value` line that no error text matches.
+        OsString::from("-progress"),
+        OsString::from("pipe:2"),
+        OsString::from("-stats_period"),
+        OsString::from("0.5"),
+        OsString::from("-i"),
+        encode_path.as_os_str().to_os_string(),
+        OsString::from("-i"),
+        reference_path.as_os_str().to_os_string(),
+        OsString::from("-lavfi"),
+        OsString::from(filter_graph),
+        OsString::from("-f"),
+        OsString::from("null"),
+        OsString::from("-"),
+    ]
+}
+
+fn ffmpeg_filter_name(metric: MetricId) -> &'static str {
+    match metric {
+        MetricId::PsnrY => "psnr",
+        MetricId::SsimAll => "ssim",
+        MetricId::XpsnrMin => "xpsnr",
+        _ => unreachable!("only the FFmpeg family reaches this function"),
+    }
+}
+
+fn log_file_name(metric: MetricId) -> &'static str {
+    match metric {
+        MetricId::PsnrY => "psnr.log",
+        MetricId::SsimAll => "ssim.log",
+        MetricId::XpsnrMin => "xpsnr.log",
+        _ => unreachable!("only the FFmpeg family reaches this function"),
+    }
+}
+
+fn log_format_of(metric: MetricId) -> LogFormat {
+    match metric {
+        MetricId::PsnrY => LogFormat::PsnrStats,
+        MetricId::SsimAll => LogFormat::SsimStats,
+        MetricId::XpsnrMin => LogFormat::XpsnrStats,
+        _ => unreachable!("only the FFmpeg family reaches this function"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use vqtt_core::backend::JobInput;
+    use vqtt_core::media::{ColorRange, MediaInfo, Rational};
+
+    fn media_info(
+        name: &str,
+        width: u32,
+        height: u32,
+        range: ColorRange,
+        frames: u64,
+    ) -> MediaInfo {
+        MediaInfo {
+            path: PathBuf::from(name),
+            bytes: 0,
+            codec: "h264".into(),
+            profile: None,
+            width,
+            height,
+            pix_fmt: "yuv420p".into(),
+            bit_depth: 8,
+            color_range: range,
+            color_space: Some("bt709".into()),
+            frame_rate: Rational { num: 30, den: 1 },
+            nb_frames: Some(frames),
+            duration_s: Some(frames as f64 / 30.0),
+            bit_rate: Some(1_000_000),
+        }
+    }
+
+    fn job_with(
+        metrics: &[MetricId],
+        fused_passes: bool,
+        reference: MediaInfo,
+        encode: MediaInfo,
+    ) -> MeasureJob {
+        MeasureJob {
+            reference: JobInput {
+                path: PathBuf::from("reference.mkv"),
+                info: reference,
+            },
+            encode: JobInput {
+                path: PathBuf::from("distorted.mkv"),
+                info: encode,
+            },
+            metrics: metrics.iter().copied().collect::<BTreeSet<_>>(),
+            frame_range: None,
+            fused_passes,
+            work_dir: PathBuf::from("work"),
+            vmaf_models: Vec::new(),
+            vmaf_viewing_distance: 3.0,
+            butteraugli_intensity_nits: 203,
+            vship_gpu_threads: 3,
+        }
+    }
+
+    fn identical_job(metrics: &[MetricId], fused_passes: bool) -> MeasureJob {
+        let info = media_info("clip.mkv", 1920, 1080, ColorRange::Tv, 150);
+        job_with(metrics, fused_passes, info.clone(), info)
+    }
+
+    fn arg_strings(invocation: &Invocation) -> Vec<String> {
+        invocation
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The filter graph, found by the flag that carries it rather than by position, so
+    /// a new global option never renumbers every test in this file.
+    fn filter_graph_of(invocation: &Invocation) -> String {
+        let args = arg_strings(invocation);
+        let at = args
+            .iter()
+            .position(|arg| arg == "-lavfi")
+            .expect("every FFmpeg invocation carries a filter graph");
+        args[at + 1].clone()
+    }
+
+    #[test]
+    fn no_ffmpeg_family_metric_gives_no_invocation() {
+        let job = identical_job(&[MetricId::Vmaf], false);
+        assert!(plan(&job).unwrap().is_empty());
+    }
+
+    #[test]
+    fn xpsnr_takes_the_reference_first_and_psnr_takes_the_distorted_first() {
+        let job = identical_job(&[MetricId::PsnrY, MetricId::XpsnrMin], false);
+        let invocations = plan(&job).unwrap();
+        assert_eq!(invocations.len(), 2);
+
+        assert_eq!(
+            arg_strings(&invocations[1]),
+            vec![
+                "-y",
+                "-v",
+                "error",
+                "-progress",
+                "pipe:2",
+                "-stats_period",
+                "0.5",
+                "-i",
+                "distorted.mkv",
+                "-i",
+                "reference.mkv",
+                "-lavfi",
+                "[1:v]setpts=PTS-STARTPTS,fps=30/1[reference_pad];[0:v]setpts=PTS-STARTPTS,fps=30/1[distorted_pad];[reference_pad][distorted_pad]xpsnr=stats_file=work/xpsnr.log",
+                "-f",
+                "null",
+                "-",
+            ]
+        );
+        assert!(
+            arg_strings(&invocations[0])
+                .iter()
+                .any(|arg| arg.contains("[distorted_pad][reference_pad]psnr=stats_file="))
+        );
+    }
+
+    #[test]
+    fn identical_media_info_fires_no_correction() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = filter_graph_of(invocation);
+        assert!(filter_graph.contains("[0:v]setpts=PTS-STARTPTS[distorted_pad]"));
+        assert!(!filter_graph.contains("scale="));
+        assert!(!filter_graph.contains("zscale="));
+        assert!(!filter_graph.contains("trim="));
+    }
+
+    #[test]
+    fn a_color_range_mismatch_adds_zscale_to_the_distorted_branch_only() {
+        let reference = media_info("reference.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Pc, 150);
+        let job = job_with(&[MetricId::PsnrY], false, reference, encode);
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = filter_graph_of(invocation);
+
+        assert!(filter_graph.contains("[0:v]setpts=PTS-STARTPTS,zscale=in_range=full:out_range=limited,format=yuv420p[distorted_pad]"));
+        assert!(filter_graph.contains("[1:v]setpts=PTS-STARTPTS[reference_pad]"));
+    }
+
+    #[test]
+    fn a_resolution_mismatch_scales_the_distorted_branch_to_the_reference_size() {
+        let reference = media_info("reference.mkv", 3840, 2160, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let job = job_with(&[MetricId::PsnrY], false, reference, encode);
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = filter_graph_of(invocation);
+
+        assert!(
+            filter_graph
+                .contains("[0:v]setpts=PTS-STARTPTS,scale=3840:2160:flags=bicubic[distorted_pad]")
+        );
+        assert!(filter_graph.contains("[1:v]setpts=PTS-STARTPTS[reference_pad]"));
+    }
+
+    #[test]
+    fn a_frame_count_mismatch_trims_both_branches_to_the_same_end_frame() {
+        let reference = media_info("reference.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Tv, 140);
+        let job = job_with(&[MetricId::PsnrY], false, reference, encode);
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = filter_graph_of(invocation);
+
+        assert!(
+            filter_graph.contains(
+                "[0:v]trim=start_frame=0:end_frame=140,setpts=PTS-STARTPTS[distorted_pad]"
+            )
+        );
+        assert!(
+            filter_graph.contains(
+                "[1:v]trim=start_frame=0:end_frame=140,setpts=PTS-STARTPTS[reference_pad]"
+            )
+        );
+    }
+
+    #[test]
+    fn a_manual_frame_range_wins_over_the_automatic_clamp() {
+        let reference = media_info("reference.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Tv, 140);
+        let mut job = job_with(&[MetricId::PsnrY], false, reference, encode);
+        job.frame_range = Some((10, 49));
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = filter_graph_of(invocation);
+
+        assert!(filter_graph.contains("trim=start_frame=10:end_frame=50"));
+    }
+
+    #[test]
+    fn disabling_the_color_range_toggle_removes_the_zscale_filter() {
+        let reference = media_info("reference.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Pc, 150);
+        let job = job_with(&[MetricId::PsnrY], false, reference, encode);
+
+        let toggles = CorrectionToggles {
+            color_range: false,
+            ..CorrectionToggles::default()
+        };
+        let invocation = &plan_with_toggles(&job, toggles).unwrap()[0];
+        let filter_graph = filter_graph_of(invocation);
+        assert!(!filter_graph.contains("zscale="));
+    }
+
+    #[test]
+    fn a_fused_pass_applies_the_same_corrections_to_every_branch() {
+        let reference = media_info("reference.mkv", 3840, 2160, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Pc, 150);
+        let job = job_with(
+            &[MetricId::PsnrY, MetricId::SsimAll, MetricId::XpsnrMin],
+            true,
+            reference,
+            encode,
+        );
+        let invocations = plan(&job).unwrap();
+        // `xpsnr` never shares the fused, `split`-based pass: the real filter divides
+        // by zero when it reads a frame through a `split` copy. It always gets its own
+        // invocation, so the fused pass here only carries PSNR and SSIM, split=2.
+        assert_eq!(invocations.len(), 2);
+        let filter_graph = filter_graph_of(&invocations[0]);
+
+        assert!(filter_graph.starts_with(
+            "[0:v]setpts=PTS-STARTPTS,scale=3840:2160:flags=bicubic,zscale=in_range=full:out_range=limited,format=yuv420p,split=2"
+        ));
+        assert!(!filter_graph.contains("xpsnr"));
+
+        let xpsnr_graph = filter_graph_of(&invocations[1]);
+        assert!(xpsnr_graph.contains("xpsnr=stats_file="));
+    }
+
+    fn v1_model(folder: &str, name: &str) -> vqtt_core::vmaf_model::VmafModel {
+        vqtt_core::vmaf_model::VmafModel {
+            path: PathBuf::from(folder).join(name),
+            is_v1: true,
+            reference_display_height: 1080,
+            normalized_viewing_distance: 3.0,
+        }
+    }
+
+    #[test]
+    fn a_vmaf_v1_pass_reads_the_distorted_input_first_like_psnr() {
+        let info = media_info("clip.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let mut job = job_with(&[MetricId::Vmaf], false, info.clone(), info);
+        job.vmaf_models = vec![v1_model("model/vmaf_v1.0.16", "vmaf_v1.0.16_3d0h.json")];
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = filter_graph_of(invocation);
+
+        assert!(
+            filter_graph.starts_with("[0:v]setpts=PTS-STARTPTS,format=yuv420p10le[distorted_pad]")
+        );
+        assert!(
+            filter_graph.contains("[1:v]setpts=PTS-STARTPTS,format=yuv420p10le[reference_pad]")
+        );
+        assert!(
+            filter_graph.contains("[distorted_pad][reference_pad]libvmaf="),
+            "libvmaf must read the distorted pad first, like psnr and ssim: {filter_graph}"
+        );
+    }
+
+    #[test]
+    fn a_chosen_vmaf_v1_model_sets_a_bare_file_name_and_a_working_directory() {
+        let info = media_info("clip.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let mut job = job_with(&[MetricId::Vmaf], false, info.clone(), info);
+        job.vmaf_models = vec![v1_model("model/vmaf_v1.0.16", "vmaf_v1.0.16_3d0h.json")];
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = filter_graph_of(invocation);
+
+        assert!(
+            filter_graph.contains("model=path='vmaf_v1.0.16_3d0h.json'"),
+            "the option string must carry no folder, so a Windows drive letter never reaches it: {filter_graph}"
+        );
+        assert!(
+            !filter_graph.contains("model/vmaf_v1.0.16"),
+            "the folder belongs in cwd, never in the option string: {filter_graph}"
+        );
+        assert_eq!(invocation.cwd, Some(PathBuf::from("model/vmaf_v1.0.16")));
+    }
+
+    #[test]
+    fn no_vmaf_v1_model_found_gives_no_invocation_for_that_pass() {
+        let job = identical_job(&[MetricId::Vmaf], false);
+        assert!(plan(&job).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cambi_in_a_v1_model_and_standalone_cambi_never_share_a_pass() {
+        let info = media_info("clip.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let mut job = job_with(
+            &[MetricId::VmafV1Cambi, MetricId::Cambi],
+            false,
+            info.clone(),
+            info,
+        );
+        job.vmaf_models = vec![v1_model("model/vmaf_v1.0.16", "vmaf_v1.0.16_3d0h.json")];
+        let invocations = plan(&job).unwrap();
+
+        assert_eq!(invocations.len(), 2);
+        let metric_sets: Vec<Vec<MetricId>> = invocations
+            .iter()
+            .map(|invocation| {
+                invocation
+                    .expects
+                    .iter()
+                    .flat_map(|artifact| artifact.metrics.clone())
+                    .collect()
+            })
+            .collect();
+        assert!(metric_sets.contains(&vec![MetricId::VmafV1Cambi]));
+        assert!(metric_sets.contains(&vec![MetricId::Cambi]));
+    }
+
+    #[test]
+    fn cambi_ticked_against_a_scaled_encode_adds_the_true_encode_size() {
+        let reference = media_info("reference.mkv", 3840, 2160, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let job = job_with(&[MetricId::Cambi], false, reference, encode);
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = filter_graph_of(invocation);
+
+        assert!(
+            filter_graph
+                .contains("cambi.enc_width=1920:cambi.enc_height=1080:cambi.enc_bitdepth=8")
+        );
+    }
+
+    #[test]
+    fn cambi_ticked_against_an_unscaled_encode_adds_no_encode_size_option() {
+        let job = identical_job(&[MetricId::Cambi], false);
+        let invocation = &plan(&job).unwrap()[0];
+        let filter_graph = filter_graph_of(invocation);
+
+        assert!(!filter_graph.contains("cambi.enc_width"));
+    }
+
+    #[test]
+    fn vmaf_v0_and_vmaf_neg_v0_each_get_their_own_named_model() {
+        let job = identical_job(&[MetricId::VmafV0, MetricId::VmafNegV0], false);
+        let invocations = plan(&job).unwrap();
+        assert_eq!(invocations.len(), 2);
+
+        let graphs: Vec<String> = invocations.iter().map(filter_graph_of).collect();
+        assert!(
+            graphs
+                .iter()
+                .any(|graph| graph.contains("model=version=vmaf_v0.6.1neg"))
+        );
+        assert!(
+            graphs
+                .iter()
+                .any(|graph| graph.contains("model=version=vmaf_v0.6.1") && !graph.contains("neg"))
+        );
+    }
+
+    #[test]
+    fn psnr_hvs_ciede_and_ms_ssim_attach_to_the_v1_pass_when_it_runs() {
+        let info = media_info("clip.mkv", 1920, 1080, ColorRange::Tv, 150);
+        let mut job = job_with(
+            &[
+                MetricId::Vmaf,
+                MetricId::PsnrHvs,
+                MetricId::Ciede2000,
+                MetricId::MsSsim,
+            ],
+            false,
+            info.clone(),
+            info,
+        );
+        job.vmaf_models = vec![v1_model("model/vmaf_v1.0.16", "vmaf_v1.0.16_3d0h.json")];
+        let invocations = plan(&job).unwrap();
+
+        assert_eq!(
+            invocations.len(),
+            1,
+            "every extra feature must ride on the one v1 pass"
+        );
+        let filter_graph = filter_graph_of(&invocations[0]);
+        assert!(filter_graph.contains("feature=name=psnr_hvs|name=ciede|name=float_ms_ssim"));
+    }
+
+    #[test]
+    fn psnr_hvs_alone_gets_its_own_pass_with_no_model_needed() {
+        let job = identical_job(&[MetricId::PsnrHvs], false);
+        let invocations = plan(&job).unwrap();
+        assert_eq!(invocations.len(), 1);
+        let filter_graph = filter_graph_of(&invocations[0]);
+        assert!(filter_graph.contains("feature=name=psnr_hvs"));
+        assert!(!filter_graph.contains("model="));
+    }
+
+    /// The `-vf` chain of a still, found by its flag rather than by position.
+    fn video_filter_of(invocation: &Invocation) -> String {
+        let args = arg_strings(invocation);
+        let at = args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("a still extraction carries a video filter");
+        args[at + 1].clone()
+    }
+
+    fn value_after(invocation: &Invocation, flag: &str) -> String {
+        let args = arg_strings(invocation);
+        let at = args.iter().position(|arg| arg == flag).unwrap();
+        args[at + 1].clone()
+    }
+
+    #[test]
+    fn a_still_seeks_before_the_frame_and_then_aims_half_a_frame_under_it() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let extract = plan_frame_extract(&job, 300, 4).unwrap();
+
+        // Frame 300 at 30 fps starts at 10 seconds. The seek lands two seconds earlier
+        // and the aim sits half a frame under the frame's own start.
+        assert_eq!(value_after(&extract.reference, "-ss"), "8.000000");
+        assert_eq!(
+            video_filter_of(&extract.reference),
+            "select='gte(t\\,9.983333)'"
+        );
+        assert_eq!(value_after(&extract.reference, "-frames:v"), "1");
+    }
+
+    /// Without `-copyts` a seek restarts the clock at zero and the aim lands two
+    /// seconds late, on the wrong frame and with nothing to say so.
+    #[test]
+    fn a_still_keeps_the_original_timestamps_across_the_seek() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let extract = plan_frame_extract(&job, 300, 4).unwrap();
+
+        for invocation in [&extract.reference, &extract.encode] {
+            let args = arg_strings(invocation);
+            let copyts = args.iter().position(|arg| arg == "-copyts");
+            let seek = args.iter().position(|arg| arg == "-ss");
+            assert!(copyts.is_some(), "the seek must keep the original clock");
+            assert!(
+                copyts < seek,
+                "-copyts belongs before the seek it applies to"
+            );
+        }
+    }
+
+    #[test]
+    fn a_frame_inside_the_seek_lead_seeks_to_the_start_and_never_before_it() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let extract = plan_frame_extract(&job, 3, 1).unwrap();
+
+        assert_eq!(value_after(&extract.reference, "-ss"), "0.000000");
+        assert_eq!(
+            video_filter_of(&extract.reference),
+            "select='gte(t\\,0.083333)'"
+        );
+    }
+
+    /// Frame zero has no frame before it, so the aim stops at the start of the file
+    /// rather than going negative.
+    #[test]
+    fn the_first_frame_aims_at_zero_and_not_below_it() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let extract = plan_frame_extract(&job, 0, 1).unwrap();
+
+        assert_eq!(
+            video_filter_of(&extract.reference),
+            "select='gte(t\\,0.000000)'"
+        );
+    }
+
+    /// The regression test for a last frame that wrote no image and reported no error.
+    /// The aim must stay below the frame's own printed start time.
+    #[test]
+    fn the_aim_of_a_frame_stays_under_its_own_start_time() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+
+        for frame in [1u64, 148, 149, 4001] {
+            let extract = plan_frame_extract(&job, frame, 1).unwrap();
+            let filter = video_filter_of(&extract.reference);
+            let aim: f64 = filter
+                .trim_start_matches("select='gte(t\\,")
+                .trim_end_matches(")'")
+                .parse()
+                .unwrap();
+            let start = frame as f64 / 30.0;
+            assert!(
+                aim < start,
+                "frame {frame}: the aim {aim} must be under {start}"
+            );
+            assert!(
+                aim > start - 1.0 / 30.0,
+                "frame {frame}: the aim {aim} reaches back past the frame before"
+            );
+        }
+    }
+
+    /// The encode must show the pixels that were measured, not the ones on disk.
+    #[test]
+    fn the_encode_still_goes_through_the_measurement_chain_and_the_reference_does_not() {
+        let reference = media_info("reference.mkv", 3840, 2160, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Pc, 150);
+        let job = job_with(&[MetricId::PsnrY], false, reference, encode);
+
+        let extract = plan_frame_extract(&job, 60, 2).unwrap();
+
+        let encode_filter = video_filter_of(&extract.encode);
+        assert!(encode_filter.contains("scale=3840:2160:flags=bicubic"));
+        assert!(encode_filter.contains("zscale=in_range=full:out_range=limited"));
+
+        let reference_filter = video_filter_of(&extract.reference);
+        assert!(!reference_filter.contains("scale="));
+        assert!(!reference_filter.contains("zscale="));
+    }
+
+    #[test]
+    fn the_difference_reads_the_two_stills_and_multiplies_by_the_gain() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let extract = plan_frame_extract(&job, 60, 8).unwrap();
+
+        let args = arg_strings(&extract.difference);
+        assert!(args.iter().any(|arg| arg.ends_with("f60_ref.png")));
+        assert!(args.iter().any(|arg| arg.ends_with("f60_enc.png")));
+
+        let graph = filter_graph_of(&extract.difference);
+        assert!(graph.contains("blend=all_mode=difference"));
+        assert!(graph.contains("clip(val*8,0,255)"));
+    }
+
+    /// The gain names the file, so changing it never reads a cached image of another
+    /// gain, and the two stills below it are shared by every gain.
+    #[test]
+    fn only_the_difference_file_carries_the_gain_in_its_name() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let four = plan_frame_extract(&job, 12, 4).unwrap();
+        let eight = plan_frame_extract(&job, 12, 8).unwrap();
+
+        assert_eq!(four.reference_path, eight.reference_path);
+        assert_eq!(four.encode_path, eight.encode_path);
+        assert_ne!(four.difference_path, eight.difference_path);
+        assert!(
+            four.difference_path
+                .to_string_lossy()
+                .ends_with("f12_diff_x4.png")
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_frame_rate_still_gives_a_command_and_reads_the_first_frame() {
+        let mut info = media_info("clip.mkv", 1920, 1080, ColorRange::Tv, 150);
+        info.frame_rate = Rational { num: 0, den: 0 };
+        let job = job_with(&[MetricId::PsnrY], false, info.clone(), info);
+
+        let extract = plan_frame_extract(&job, 900, 1).unwrap();
+
+        assert_eq!(value_after(&extract.reference, "-ss"), "0.000000");
+        assert!(video_filter_of(&extract.reference).contains("gte(t\\,0.000000)"));
+    }
+}

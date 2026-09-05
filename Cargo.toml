@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/vqa-core",
-    "crates/vqa-backends",
-    "crates/vqa-run",
-    "crates/vqa-gui",
+    "crates/vqtt-core",
+    "crates/vqtt-backends",
+    "crates/vqtt-run",
+    "crates/vqtt-gui",
 ]
 
 [workspace.package]
@@ -15,9 +15,9 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace.dependencies]
-vqa-core = { path = "crates/vqa-core" }
-vqa-backends = { path = "crates/vqa-backends" }
-vqa-run = { path = "crates/vqa-run" }
+vqtt-core = { path = "crates/vqtt-core" }
+vqtt-backends = { path = "crates/vqtt-backends" }
+vqtt-run = { path = "crates/vqtt-run" }
 
 anyhow = "1.0"
 directories = "6.0"
