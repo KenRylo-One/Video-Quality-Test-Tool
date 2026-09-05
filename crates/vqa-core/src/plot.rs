@@ -86,6 +86,9 @@ pub struct Column {
     pub min: f32,
     pub max: f32,
     pub mean: f32,
+    /// The frame in this column with the worst value for the metric's direction, so a
+    /// click on a spike opens the spike and not its neighbour.
+    pub worst_frame: u64,
 }
 
 /// The name of one line, drawn past the right edge at the height the line ends on.
@@ -406,6 +409,8 @@ fn line_shapes(
                 plot,
                 y_lo,
                 y_hi,
+                request.first_frame,
+                request.metric.def().direction,
             );
             if columns.is_empty() {
                 return None;
@@ -434,6 +439,7 @@ fn line_shapes(
 /// Each column keeps the lowest, the highest and the mean of the frames that fall in
 /// it. The band between the lowest and the highest is the reason a single bad frame in
 /// two hundred thousand is still visible at full zoom out.
+#[allow(clippy::too_many_arguments)]
 fn decimate(
     values: &[f32],
     first_sample: usize,
@@ -442,6 +448,8 @@ fn decimate(
     plot: &Rect,
     y_lo: f32,
     y_hi: f32,
+    first_frame: u64,
+    direction: Direction,
 ) -> Vec<Column> {
     let span = (last_sample - first_sample) as f32;
     let mut columns = Vec::with_capacity(columns_across);
@@ -455,17 +463,24 @@ fn decimate(
         let mut highest = f32::NEG_INFINITY;
         let mut total = 0.0f32;
         let mut counted = 0u32;
-        for value in values
+        let mut worst = f32::NAN;
+        let mut worst_sample = start;
+        for (offset, value) in values
             .iter()
             .take(end)
             .skip(start)
             .copied()
-            .filter(|value| value.is_finite())
+            .enumerate()
+            .filter(|(_, value)| value.is_finite())
         {
             lowest = lowest.min(value);
             highest = highest.max(value);
             total += value;
             counted += 1;
+            if !worst.is_finite() || is_worse(value, worst, direction) {
+                worst = value;
+                worst_sample = start + offset;
+            }
         }
         if counted == 0 {
             continue;
@@ -475,9 +490,21 @@ fn decimate(
             min: y_for(lowest, plot, y_lo, y_hi),
             max: y_for(highest, plot, y_lo, y_hi),
             mean: y_for(total / counted as f32, plot, y_lo, y_hi),
+            worst_frame: first_frame + worst_sample as u64,
         });
     }
     columns
+}
+
+/// Whether the first value is the worse of the two for this metric.
+///
+/// For CAMBI the worse value is the higher one. Getting this backwards sends the frame
+/// viewer to the best frame in the column, and nothing on screen would say so.
+pub fn is_worse(value: f32, than: f32, direction: Direction) -> bool {
+    match direction {
+        Direction::LowerIsBetter => value > than,
+        _ => value < than,
+    }
 }
 
 fn y_for(value: f32, plot: &Rect, y_lo: f32, y_hi: f32) -> f32 {
@@ -1398,6 +1425,60 @@ mod tests {
             dashed.iter().filter(|op| op.starts_with("line")).count()
                 > solid.iter().filter(|op| op.starts_with("line")).count()
         );
+    }
+
+    /// Acceptance test 1 of milestone M6, in the part that needs no window: a column
+    /// covers many frames, and the one it names is the worst of them.
+    #[test]
+    fn a_column_names_the_worst_frame_it_covers() {
+        let mut values = vec![45.0f32; 4000];
+        values[2500] = 21.0;
+        let series = [input(1, 0, "encode.mp4", &values)];
+        let scenes = build_scenes(&request(MetricId::PsnrY, &series));
+
+        let columns = &lines(&scenes[0])[0].columns;
+        let holds_the_dip = columns.iter().any(|column| column.worst_frame == 2500);
+        assert!(holds_the_dip, "no column names the one bad frame");
+        assert!(columns.iter().all(|column| column.worst_frame < 4000));
+    }
+
+    #[test]
+    fn a_low_is_better_column_names_its_highest_frame_and_a_high_is_better_one_its_lowest() {
+        let mut values = vec![5.0f32; 600];
+        values[300] = 20.0;
+        let series = [input(1, 0, "encode.mp4", &values)];
+
+        let low_better = build_scenes(&request(MetricId::Cambi, &series));
+        assert!(
+            lines(&low_better[0])[0]
+                .columns
+                .iter()
+                .any(|column| column.worst_frame == 300)
+        );
+
+        let mut dipped = vec![45.0f32; 600];
+        dipped[300] = 21.0;
+        let other = [input(1, 0, "encode.mp4", &dipped)];
+        let high_better = build_scenes(&request(MetricId::PsnrY, &other));
+        assert!(
+            lines(&high_better[0])[0]
+                .columns
+                .iter()
+                .any(|column| column.worst_frame == 300)
+        );
+    }
+
+    #[test]
+    fn a_run_over_part_of_a_file_names_real_frame_numbers_in_its_columns() {
+        let values = vec![45.0f32; 400];
+        let series = [input(1, 0, "encode.mp4", &values)];
+        let mut offset = request(MetricId::PsnrY, &series);
+        offset.first_frame = 1200;
+
+        let scenes = build_scenes(&offset);
+        let columns = &lines(&scenes[0])[0].columns;
+
+        assert!(columns.iter().all(|column| column.worst_frame >= 1200));
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub mod capability;
 pub mod corrections;
 pub mod error;
 pub mod estimate;
+pub mod frames;
 pub mod media;
 pub mod metric;
 pub mod palette;
@@ -30,6 +31,7 @@ pub use corrections::{
 };
 pub use error::{CoreError, Result};
 pub use estimate::RunEstimate;
+pub use frames::{FrameValue, worst_frames};
 pub use media::{ColorRange, Fingerprint, FrameSample, LumaExtremes, MediaInfo, Rational};
 pub use metric::{
     Availability, Direction, HarmonicMean, MetricDef, MetricGroup, MetricId, Percentile, Provider,
