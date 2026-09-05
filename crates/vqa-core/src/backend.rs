@@ -80,6 +80,9 @@ pub struct Progress {
 pub struct ExitReport {
     pub succeeded: bool,
     pub wall_time_ms: u64,
+    /// The code the process left with. A process that a signal stopped, or that the
+    /// tool killed, reports nothing here.
+    pub exit_code: Option<i32>,
     /// The last thing the process said that was not a frame count. A back end that
     /// cannot run usually explains itself, and those words are the only thing that
     /// tells the reader what to change.

@@ -1,10 +1,11 @@
 use crate::media::{ColorRange, LumaExtremes, MediaInfo};
 use crate::metric::{MetricGroup, MetricId};
 use crate::vmaf_model::{self, VmafModel};
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum CorrectionId {
     ColorRange,
     Resolution,
@@ -26,7 +27,7 @@ impl CorrectionId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum NoteId {
     RangeFlagDisagreesWithData,
     NearLosslessReference,
@@ -39,7 +40,7 @@ pub enum NoteId {
     VshipCorrectionNotApplied,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum CorrectionDetail {
     ColorRange {
         from: ColorRange,
@@ -63,7 +64,7 @@ pub enum CorrectionDetail {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Correction {
     pub id: CorrectionId,
     pub target_label: String,
@@ -71,7 +72,7 @@ pub struct Correction {
     pub detail: CorrectionDetail,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Note {
     pub id: NoteId,
     pub message: String,

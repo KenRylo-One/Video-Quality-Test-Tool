@@ -1,5 +1,7 @@
 use crate::metric::HarmonicMean;
+use serde::Serialize;
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Pooled {
     pub mean: f32,
     pub harmonic_mean: Option<f32>,
