@@ -552,6 +552,30 @@ mod tests {
         );
     }
 
+    /// An MP4 of `mpeg4` or `h264` often carries no range flag at all, and it is limited
+    /// range. Reading that as full range converted it a second time and moved every level
+    /// by about 7% of the range, which read as a bad encoder.
+    #[test]
+    fn an_unflagged_encode_against_a_limited_reference_needs_no_correction() {
+        let reference = media_info(1280, 720, ColorRange::Tv, "yuv420p", "ffv1", 300);
+        let encode = media_info(1280, 720, ColorRange::Unknown, "yuv420p", "mpeg4", 300);
+        assert!(detect_color_range(&reference, &encode, "encode.mp4").is_none());
+    }
+
+    #[test]
+    fn an_unflagged_encode_against_a_full_range_reference_is_still_converted() {
+        let reference = media_info(1280, 720, ColorRange::Pc, "yuv420p", "h264", 300);
+        let encode = media_info(1280, 720, ColorRange::Unknown, "yuv420p", "mpeg4", 300);
+        let correction = detect_color_range(&reference, &encode, "encode.mp4").unwrap();
+        assert_eq!(
+            correction.detail,
+            CorrectionDetail::ColorRange {
+                from: ColorRange::Tv,
+                to: ColorRange::Pc
+            }
+        );
+    }
+
     #[test]
     fn a_yuvj_pixel_format_counts_as_full_range_for_the_correction() {
         let reference = media_info(1920, 1080, ColorRange::Tv, "yuv420p", "h264", 150);

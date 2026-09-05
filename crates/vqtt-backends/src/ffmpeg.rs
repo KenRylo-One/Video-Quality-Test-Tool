@@ -668,7 +668,7 @@ fn distorted_chain(
             .info
             .effective_color_range()
             .ffmpeg_value()
-            .unwrap_or("full");
+            .unwrap_or("limited");
         let to = job
             .reference
             .info

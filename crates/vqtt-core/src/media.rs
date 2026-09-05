@@ -255,10 +255,15 @@ impl MediaInfo {
 
     /// The color range that the pixel data really has.
     ///
-    /// A `yuvj` pixel format is full range whatever the flag says.
+    /// A `yuvj` pixel format is full range whatever the flag says. An unset flag then
+    /// means limited, which is the convention for every other YUV format and what a
+    /// decoder assumes. Reading unset as full would convert an already limited encode a
+    /// second time and move every level by about 7% of the range.
     pub fn effective_color_range(&self) -> ColorRange {
         if self.pix_fmt_is_full_range() {
             ColorRange::Pc
+        } else if self.color_range == ColorRange::Unknown {
+            ColorRange::Tv
         } else {
             self.color_range
         }
@@ -371,6 +376,16 @@ mod tests {
         assert_eq!(bit_depth_from_pix_fmt("rgb24"), 8);
         assert_eq!(bit_depth_from_pix_fmt("rgba64le"), 16);
         assert_eq!(bit_depth_from_pix_fmt("nv12"), 8);
+    }
+
+    #[test]
+    fn an_unset_flag_on_a_yuv_format_means_limited_range() {
+        assert_eq!(ColorRange::Unknown.ffmpeg_value(), None);
+        assert_eq!(ColorRange::Tv.ffmpeg_value(), Some("limited"));
+        assert_eq!(ColorRange::Pc.ffmpeg_value(), Some("full"));
+        // The flag itself keeps saying unset, because the Files section must not claim a
+        // flag the file does not carry.
+        assert_eq!(ColorRange::Unknown.tag(), "unset");
     }
 
     #[test]
