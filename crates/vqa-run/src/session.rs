@@ -87,49 +87,29 @@ impl Session {
             cache,
         };
         session.refresh_inventory();
-        session.tick_defaults();
         session
     }
 
     /// Looks for every binary again, and reads the capabilities of each one.
     ///
     /// A machine with no binaries is a normal first run. This reports no error.
+    ///
+    /// This blocks. Use `scan_binaries` on a worker thread and then `apply_scan` when
+    /// a window is waiting on the answer.
     pub fn refresh_inventory(&mut self) {
-        let mut discovery = discovery::Discovery::from_current_exe();
-        for (id, path) in &self.settings.binary_paths {
-            discovery.overrides.insert(*id, path.clone());
-        }
+        let scan = scan_binaries(&self.settings, self.cache.clone());
+        self.apply_scan(scan);
+    }
 
-        let mut inventory = Inventory::new();
-        let mut cache_changed = false;
-
-        for id in BinaryId::ALL {
-            let Some(path) = discovery::find_path(id, &discovery) else {
-                continue;
-            };
-            let Ok(sha256) = hash::sha256_file(&path) else {
-                continue;
-            };
-
-            if let Some(found) = self.cache.recall(id, &path, &sha256) {
-                inventory.insert(found);
-                continue;
-            }
-
-            match discovery::probe_binary(id, &path) {
-                Ok(found) => {
-                    self.cache.remember(&found);
-                    cache_changed = true;
-                    inventory.insert(found);
-                }
-                Err(error) => {
-                    tracing::warn!(binary = id.display_name(), %error, "the capability probe failed");
-                }
-            }
-        }
-
-        self.inventory = inventory;
-        if cache_changed {
+    /// Installs a scan that ran somewhere else, and writes the cache if it grew.
+    ///
+    /// A back end that was missing a moment ago can now run, so the default ticks are
+    /// taken again. That only ever adds a tick, and never clears one the reader set.
+    pub fn apply_scan(&mut self, scan: BinaryScan) {
+        self.inventory = scan.inventory;
+        self.cache = scan.cache;
+        self.tick_defaults();
+        if scan.cache_changed {
             if let Err(error) = self.cache.save() {
                 tracing::warn!(%error, "cannot write the capability cache");
             }
@@ -292,11 +272,70 @@ impl Session {
         }
     }
 
+    /// A copy of the capability cache, for a scan that runs on another thread.
+    pub fn cache_snapshot(&self) -> CapabilityCache {
+        self.cache.clone()
+    }
+
     /// Writes the settings.
     pub fn save_settings(&self) {
         if let Err(error) = self.settings.save() {
             tracing::warn!(%error, "cannot write the settings file");
         }
+    }
+}
+
+/// The result of looking for every binary.
+pub struct BinaryScan {
+    pub inventory: Inventory,
+    pub cache: CapabilityCache,
+    /// True when a binary was probed for real, so the cache is worth writing.
+    pub cache_changed: bool,
+}
+
+/// Finds and reads every binary, with no `Session` and no window.
+///
+/// This is slow enough that it must not run on the interface thread. It hashes each
+/// binary to key the cache, and a full FFmpeg build is over a hundred megabytes. A
+/// graphics back end also starts its own device before it prints a version.
+pub fn scan_binaries(settings: &Settings, mut cache: CapabilityCache) -> BinaryScan {
+    let mut discovery = discovery::Discovery::from_current_exe();
+    for (id, path) in &settings.binary_paths {
+        discovery.overrides.insert(*id, path.clone());
+    }
+
+    let mut inventory = Inventory::new();
+    let mut cache_changed = false;
+
+    for id in BinaryId::ALL {
+        let Some(path) = discovery::find_path(id, &discovery) else {
+            continue;
+        };
+        let Ok(sha256) = hash::sha256_file(&path) else {
+            continue;
+        };
+
+        if let Some(found) = cache.recall(id, &path, &sha256) {
+            inventory.insert(found);
+            continue;
+        }
+
+        match discovery::probe_binary(id, &path) {
+            Ok(found) => {
+                cache.remember(&found);
+                cache_changed = true;
+                inventory.insert(found);
+            }
+            Err(error) => {
+                tracing::warn!(binary = id.display_name(), %error, "the capability probe failed");
+            }
+        }
+    }
+
+    BinaryScan {
+        inventory,
+        cache,
+        cache_changed,
     }
 }
 

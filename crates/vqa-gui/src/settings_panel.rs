@@ -22,6 +22,12 @@ pub struct SettingsUi {
     pub open: bool,
     /// The text of each path field.
     pub paths: BTreeMap<BinaryId, String>,
+    /// Set when the reader pressed find. The window starts the search on a worker
+    /// thread, because hashing a large binary and asking a graphics tool for its
+    /// version take long enough to stop the window answering.
+    pub rescan: Option<(BinaryId, Option<PathBuf>)>,
+    /// True while that search runs.
+    pub scanning: bool,
 }
 
 impl SettingsUi {
@@ -67,7 +73,7 @@ pub fn show(ui: &mut Ui, tokens: &Tokens, session: &mut Session, state: &mut Set
         ui.label(mono("BINARIES", 10.5, tokens.text_muted));
         ui.add_space(4.0);
         for id in BinaryId::ALL {
-            changed |= binary_row(ui, tokens, session, state, id);
+            binary_row(ui, tokens, session, state, id);
             ui.add_space(6.0);
         }
 
@@ -110,15 +116,16 @@ fn first_run_banner(ui: &mut Ui, tokens: &Tokens) {
 }
 
 /// One row of the binary list.
+///
+/// Pressing find changes no setting here. It records the request, and the window acts
+/// on it away from the interface thread.
 fn binary_row(
     ui: &mut Ui,
     tokens: &Tokens,
-    session: &mut Session,
+    session: &Session,
     state: &mut SettingsUi,
     id: BinaryId,
-) -> bool {
-    let mut changed = false;
-
+) {
     card(ui, tokens, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
@@ -129,6 +136,9 @@ fn binary_row(
                     Some(found) => {
                         let version = found.capabilities.version_label().to_string();
                         ui.label(mono(format!("found · {version}"), 10.5, tokens.good));
+                    }
+                    None if state.scanning => {
+                        ui.label(mono("looking…", 10.5, tokens.text_muted));
                     }
                     None => {
                         ui.label(mono("not found", 10.5, tokens.warn));
@@ -146,13 +156,13 @@ fn binary_row(
                     .hint_text("leave empty to search the PATH")
                     .font(egui::FontId::monospace(11.0)),
             );
-            if ui.button(sans("find", 11.5, tokens.text)).on_hover_text(
-                "Searches the path above, then a bin folder beside the tool, then the PATH of the operating system.",
+            let find = ui.add_enabled(!state.scanning, egui::Button::new(sans("find", 11.5, tokens.text)));
+            if find.on_hover_text(
+                "Searches the path above, then a bin folder beside the tool, then the PATH of the operating system. The path can name the program or the folder that holds it.",
             ).clicked() {
                 let value = state.paths.get(&id).cloned().unwrap_or_default();
                 let path = if value.trim().is_empty() { None } else { Some(PathBuf::from(value.trim())) };
-                session.set_binary_path(id, path);
-                changed = true;
+                state.rescan = Some((id, path));
             }
         });
 
@@ -170,8 +180,6 @@ fn binary_row(
             ));
         }
     });
-
-    changed
 }
 
 /// The settings that change a number.

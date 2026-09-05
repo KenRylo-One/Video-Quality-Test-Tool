@@ -12,7 +12,7 @@ pub mod vmaf_models;
 
 pub use cache::CapabilityCache;
 pub use csv_writer::{MetricColumn, write_frame_csv};
-pub use session::{Selection, Session};
+pub use session::{BinaryScan, Selection, Session, scan_binaries};
 pub use settings::{BUTTERAUGLI_PRESET_NITS, Settings, ThemeChoice, VIEWING_DISTANCES};
 pub use supervisor::{
     EncodeWork, RealProcessRunner, SupervisorEvent, run_plan, run_plan_with_cancel,

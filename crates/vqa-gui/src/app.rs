@@ -38,6 +38,8 @@ pub struct VqaApp {
     settings_ui: SettingsUi,
     plot_ui: PlotUi,
     run: Option<RunState>,
+    /// A binary search running on a worker thread.
+    scan: Option<std::sync::mpsc::Receiver<vqa_run::BinaryScan>>,
 }
 
 impl VqaApp {
@@ -62,6 +64,7 @@ impl VqaApp {
             settings_ui,
             plot_ui: PlotUi::default(),
             run: None,
+            scan: None,
         }
     }
 
@@ -144,6 +147,47 @@ impl VqaApp {
                     });
                 });
             });
+    }
+
+    /// Starts a binary search on a worker thread, and takes the answer when it lands.
+    ///
+    /// Hashing a full FFmpeg build is over a hundred megabytes of reading, and a
+    /// graphics back end starts its own device before it prints a version. Neither can
+    /// happen on the interface thread without the window going silent.
+    fn drive_binary_scan(&mut self, context: &egui::Context) {
+        if let Some((id, path)) = self.settings_ui.rescan.take() {
+            self.session.settings.set_binary_path(id, path);
+            self.session.save_settings();
+
+            let settings = self.session.settings.clone();
+            let cache = self.session.cache_snapshot();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let signal = context.clone();
+            std::thread::spawn(move || {
+                let _ = sender.send(vqa_run::scan_binaries(&settings, cache));
+                signal.request_repaint();
+            });
+            self.scan = Some(receiver);
+            self.settings_ui.scanning = true;
+        }
+
+        let Some(receiver) = &self.scan else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(scan) => {
+                self.session.apply_scan(scan);
+                self.scan = None;
+                self.settings_ui.scanning = false;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                context.request_repaint_after(std::time::Duration::from_millis(120));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.scan = None;
+                self.settings_ui.scanning = false;
+            }
+        }
     }
 
     /// Dims the page behind the Settings panel, and reports a click on that dimming.
@@ -253,6 +297,7 @@ impl eframe::App for VqaApp {
         }
 
         self.title_bar(ui);
+        self.drive_binary_scan(&context);
 
         // A run reports its result over a channel from a background thread. Reading it
         // here, once a frame, keeps the interface thread from ever waiting on a process.
