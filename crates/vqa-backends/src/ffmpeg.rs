@@ -130,6 +130,188 @@ pub fn plan_with_toggles(
     Ok(invocations)
 }
 
+/// How far before the wanted frame the extraction seeks.
+///
+/// An input seek lands on the keyframe at or before the time it is given, and then the
+/// filter takes the first frame at or after the real target. Two seconds clears a
+/// normal keyframe interval without decoding much.
+const SEEK_LEAD_S: f64 = 2.0;
+
+/// The three images one frame is shown as.
+pub struct FrameExtract {
+    pub reference: Invocation,
+    pub encode: Invocation,
+    /// Reads the two PNG files above, so a new gain costs no video decode.
+    pub difference: Invocation,
+    pub reference_path: PathBuf,
+    pub encode_path: PathBuf,
+    pub difference_path: PathBuf,
+}
+
+/// Builds the commands that write one frame three ways.
+///
+/// The encode goes through the same correction chain the measurement used, so the
+/// picture is the one that was scored and not the one on disk. The reference is never
+/// scaled and never range converted, which is the rule the whole correction design
+/// rests on.
+pub fn plan_frame_extract(job: &MeasureJob, frame: u64, gain: u32) -> vqa_core::Result<FrameExtract> {
+    let target_label = job.encode.info.file_name();
+    let detected = corrections::detect_all(
+        &job.reference.info,
+        &job.encode.info,
+        &target_label,
+        None,
+        &job.metrics,
+        &job.vmaf_models,
+        job.vmaf_viewing_distance,
+    );
+
+    let seconds = frame_seconds(frame, job.reference.info.frame_rate);
+    let aim = select_seconds(frame, job.reference.info.frame_rate);
+    let reference_path = job.work_dir.join(format!("f{frame}_ref.png"));
+    let encode_path = job.work_dir.join(format!("f{frame}_enc.png"));
+    let difference_path = job.work_dir.join(format!("f{frame}_diff_x{gain}.png"));
+
+    let encode_chain = distorted_chain(job, &detected, None);
+
+    Ok(FrameExtract {
+        reference: still_invocation(
+            &job.reference.path,
+            seconds,
+            &select_clause(aim),
+            &reference_path,
+        ),
+        encode: still_invocation(
+            &job.encode.path,
+            seconds,
+            &format!("{},{}", select_clause(aim), encode_chain),
+            &encode_path,
+        ),
+        difference: difference_invocation(
+            &reference_path,
+            &encode_path,
+            gain,
+            &difference_path,
+        ),
+        reference_path,
+        encode_path,
+        difference_path,
+    })
+}
+
+/// Where one frame starts, in seconds.
+///
+/// A zero frame rate gives zero, and the extraction reads the first frame rather than
+/// refusing to run.
+fn frame_seconds(frame: u64, rate: Rational) -> f64 {
+    if rate.num == 0 || rate.den == 0 {
+        return 0.0;
+    }
+    frame as f64 * rate.den as f64 / rate.num as f64
+}
+
+/// What `select` aims at to land on this frame and no other.
+///
+/// `select` compares against the frame's own start time, so the target must sit above
+/// the frame before and no higher than this one. Half a frame earlier is the middle of
+/// that gap, and it is what makes the aim survive being printed with six decimal
+/// places: frame 149 at 30 fps starts at 4.9666666, which prints as 4.966667, and a
+/// `gte` against that number matches nothing at all. The last frame of a file then
+/// writes no image and reports no error. Measured against the real binary on `TEST_A`.
+fn select_seconds(frame: u64, rate: Rational) -> f64 {
+    if rate.num == 0 || rate.den == 0 {
+        return 0.0;
+    }
+    ((frame as f64 - 0.5) * rate.den as f64 / rate.num as f64).max(0.0)
+}
+
+/// Takes the first frame at or after the target time.
+///
+/// The `select` filter counts `n` from the first frame the seek delivered, not from the
+/// start of the file, so an absolute frame number cannot be used after an input seek.
+/// An absolute timestamp can be, but only with `-copyts`. See `still_invocation`.
+fn select_clause(seconds: f64) -> String {
+    format!("select='gte(t\\,{seconds:.6})'")
+}
+
+fn still_invocation(
+    input: &std::path::Path,
+    seconds: f64,
+    filter: &str,
+    output: &std::path::Path,
+) -> Invocation {
+    let seek = (seconds - SEEK_LEAD_S).max(0.0);
+    Invocation {
+        program: PathBuf::from("ffmpeg"),
+        args: vec![
+            OsString::from("-y"),
+            OsString::from("-v"),
+            OsString::from("error"),
+            // An input seek restarts the timestamps at zero, so without this the target
+            // would point at a frame two seconds past the wanted one. Measured against
+            // the real binary: after `-ss 2.95` the first frame reports 0.0166667, and
+            // with `-copyts` it reports 2.966667.
+            OsString::from("-copyts"),
+            OsString::from("-ss"),
+            OsString::from(format!("{seek:.6}")),
+            OsString::from("-i"),
+            input.as_os_str().to_os_string(),
+            OsString::from("-vf"),
+            OsString::from(filter),
+            OsString::from("-frames:v"),
+            OsString::from("1"),
+            OsString::from("-update"),
+            OsString::from("1"),
+            output.as_os_str().to_os_string(),
+        ],
+        env: Vec::new(),
+        cwd: None,
+        expects: Vec::new(),
+        lane: LaneKind::Cpu,
+        binary: BinaryId::Ffmpeg,
+    }
+}
+
+/// The absolute difference of the two stills, multiplied by the gain and clipped.
+///
+/// A difference at a gain of one is invisible for a small error, so the viewer needs
+/// the multiply. This is a viewing aid and never a measurement.
+fn difference_invocation(
+    reference: &std::path::Path,
+    encode: &std::path::Path,
+    gain: u32,
+    output: &std::path::Path,
+) -> Invocation {
+    let gain = gain.max(1);
+    Invocation {
+        program: PathBuf::from("ffmpeg"),
+        args: vec![
+            OsString::from("-y"),
+            OsString::from("-v"),
+            OsString::from("error"),
+            OsString::from("-i"),
+            reference.as_os_str().to_os_string(),
+            OsString::from("-i"),
+            encode.as_os_str().to_os_string(),
+            OsString::from("-lavfi"),
+            OsString::from(format!(
+                "[0:v][1:v]blend=all_mode=difference,format=gbrp,\
+lutrgb=r='clip(val*{gain},0,255)':g='clip(val*{gain},0,255)':b='clip(val*{gain},0,255)'"
+            )),
+            OsString::from("-frames:v"),
+            OsString::from("1"),
+            OsString::from("-update"),
+            OsString::from("1"),
+            output.as_os_str().to_os_string(),
+        ],
+        env: Vec::new(),
+        cwd: None,
+        expects: Vec::new(),
+        lane: LaneKind::Cpu,
+        binary: BinaryId::Ffmpeg,
+    }
+}
+
 /// Drops a detected correction that a test asked to disable, and drops the frame range
 /// that came from it, so the toggle really turns the correction off.
 fn apply_toggles(detected: &mut DetectedCorrections, toggles: CorrectionToggles) {
@@ -1004,5 +1186,162 @@ mod tests {
         let filter_graph = filter_graph_of(&invocations[0]);
         assert!(filter_graph.contains("feature=name=psnr_hvs"));
         assert!(!filter_graph.contains("model="));
+    }
+
+    /// The `-vf` chain of a still, found by its flag rather than by position.
+    fn video_filter_of(invocation: &Invocation) -> String {
+        let args = arg_strings(invocation);
+        let at = args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("a still extraction carries a video filter");
+        args[at + 1].clone()
+    }
+
+    fn value_after(invocation: &Invocation, flag: &str) -> String {
+        let args = arg_strings(invocation);
+        let at = args.iter().position(|arg| arg == flag).unwrap();
+        args[at + 1].clone()
+    }
+
+    #[test]
+    fn a_still_seeks_before_the_frame_and_then_aims_half_a_frame_under_it() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let extract = plan_frame_extract(&job, 300, 4).unwrap();
+
+        // Frame 300 at 30 fps starts at 10 seconds. The seek lands two seconds earlier
+        // and the aim sits half a frame under the frame's own start.
+        assert_eq!(value_after(&extract.reference, "-ss"), "8.000000");
+        assert_eq!(
+            video_filter_of(&extract.reference),
+            "select='gte(t\\,9.983333)'"
+        );
+        assert_eq!(value_after(&extract.reference, "-frames:v"), "1");
+    }
+
+    /// Without `-copyts` a seek restarts the clock at zero and the aim lands two
+    /// seconds late, on the wrong frame and with nothing to say so.
+    #[test]
+    fn a_still_keeps_the_original_timestamps_across_the_seek() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let extract = plan_frame_extract(&job, 300, 4).unwrap();
+
+        for invocation in [&extract.reference, &extract.encode] {
+            let args = arg_strings(invocation);
+            let copyts = args.iter().position(|arg| arg == "-copyts");
+            let seek = args.iter().position(|arg| arg == "-ss");
+            assert!(copyts.is_some(), "the seek must keep the original clock");
+            assert!(copyts < seek, "-copyts belongs before the seek it applies to");
+        }
+    }
+
+    #[test]
+    fn a_frame_inside_the_seek_lead_seeks_to_the_start_and_never_before_it() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let extract = plan_frame_extract(&job, 3, 1).unwrap();
+
+        assert_eq!(value_after(&extract.reference, "-ss"), "0.000000");
+        assert_eq!(
+            video_filter_of(&extract.reference),
+            "select='gte(t\\,0.083333)'"
+        );
+    }
+
+    /// Frame zero has no frame before it, so the aim stops at the start of the file
+    /// rather than going negative.
+    #[test]
+    fn the_first_frame_aims_at_zero_and_not_below_it() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let extract = plan_frame_extract(&job, 0, 1).unwrap();
+
+        assert_eq!(
+            video_filter_of(&extract.reference),
+            "select='gte(t\\,0.000000)'"
+        );
+    }
+
+    /// The regression test for a last frame that wrote no image and reported no error.
+    /// The aim must stay below the frame's own printed start time.
+    #[test]
+    fn the_aim_of_a_frame_stays_under_its_own_start_time() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+
+        for frame in [1u64, 148, 149, 4001] {
+            let extract = plan_frame_extract(&job, frame, 1).unwrap();
+            let filter = video_filter_of(&extract.reference);
+            let aim: f64 = filter
+                .trim_start_matches("select='gte(t\\,")
+                .trim_end_matches(")'")
+                .parse()
+                .unwrap();
+            let start = frame as f64 / 30.0;
+            assert!(aim < start, "frame {frame}: the aim {aim} must be under {start}");
+            assert!(
+                aim > start - 1.0 / 30.0,
+                "frame {frame}: the aim {aim} reaches back past the frame before"
+            );
+        }
+    }
+
+    /// The encode must show the pixels that were measured, not the ones on disk.
+    #[test]
+    fn the_encode_still_goes_through_the_measurement_chain_and_the_reference_does_not() {
+        let reference = media_info("reference.mkv", 3840, 2160, ColorRange::Tv, 150);
+        let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Pc, 150);
+        let job = job_with(&[MetricId::PsnrY], false, reference, encode);
+
+        let extract = plan_frame_extract(&job, 60, 2).unwrap();
+
+        let encode_filter = video_filter_of(&extract.encode);
+        assert!(encode_filter.contains("scale=3840:2160:flags=bicubic"));
+        assert!(encode_filter.contains("zscale=in_range=full:out_range=limited"));
+
+        let reference_filter = video_filter_of(&extract.reference);
+        assert!(!reference_filter.contains("scale="));
+        assert!(!reference_filter.contains("zscale="));
+    }
+
+    #[test]
+    fn the_difference_reads_the_two_stills_and_multiplies_by_the_gain() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let extract = plan_frame_extract(&job, 60, 8).unwrap();
+
+        let args = arg_strings(&extract.difference);
+        assert!(args.iter().any(|arg| arg.ends_with("f60_ref.png")));
+        assert!(args.iter().any(|arg| arg.ends_with("f60_enc.png")));
+
+        let graph = filter_graph_of(&extract.difference);
+        assert!(graph.contains("blend=all_mode=difference"));
+        assert!(graph.contains("clip(val*8,0,255)"));
+    }
+
+    /// The gain names the file, so changing it never reads a cached image of another
+    /// gain, and the two stills below it are shared by every gain.
+    #[test]
+    fn only_the_difference_file_carries_the_gain_in_its_name() {
+        let job = identical_job(&[MetricId::PsnrY], false);
+        let four = plan_frame_extract(&job, 12, 4).unwrap();
+        let eight = plan_frame_extract(&job, 12, 8).unwrap();
+
+        assert_eq!(four.reference_path, eight.reference_path);
+        assert_eq!(four.encode_path, eight.encode_path);
+        assert_ne!(four.difference_path, eight.difference_path);
+        assert!(
+            four.difference_path
+                .to_string_lossy()
+                .ends_with("f12_diff_x4.png")
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_frame_rate_still_gives_a_command_and_reads_the_first_frame() {
+        let mut info = media_info("clip.mkv", 1920, 1080, ColorRange::Tv, 150);
+        info.frame_rate = Rational { num: 0, den: 0 };
+        let job = job_with(&[MetricId::PsnrY], false, info.clone(), info);
+
+        let extract = plan_frame_extract(&job, 900, 1).unwrap();
+
+        assert_eq!(value_after(&extract.reference, "-ss"), "0.000000");
+        assert!(video_filter_of(&extract.reference).contains("gte(t\\,0.000000)"));
     }
 }
