@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use vqa_backends::{ffmpeg, vship};
 use vqa_core::backend::{JobInput, MeasureJob};
@@ -7,7 +8,7 @@ use vqa_core::corrections;
 use vqa_core::metric::MetricId;
 use vqa_core::pooling::Pooled;
 use vqa_core::set::FileId;
-use vqa_run::{EncodeWork, RealProcessRunner, Session, SupervisorEvent, run_plan};
+use vqa_run::{EncodeWork, RealProcessRunner, Session, SupervisorEvent};
 
 pub struct RunState {
     receiver: Receiver<SupervisorEvent>,
@@ -25,6 +26,11 @@ pub struct RunState {
     /// horizontal axis reads real frame numbers, not offsets into a clamped range.
     pub first_frame: u64,
     pub frame_rate: vqa_core::media::Rational,
+    /// The metric a lane last reported a frame for, and how far it has reached.
+    pub progress: Option<(MetricId, u64)>,
+    /// How many frames one metric covers, for the progress bar.
+    pub total_frames: Option<u64>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl RunState {
@@ -141,11 +147,13 @@ impl RunState {
         let encodes_remaining = work.len();
         let cpu_lane_permits = session.settings.cpu_lane_permits as usize;
         let gpu_lane_permits = session.settings.gpu_lane_permits as usize;
-        let receiver = run_plan(
+        let cancel = Arc::new(AtomicBool::new(false));
+        let receiver = vqa_run::run_plan_with_cancel(
             work,
-            Arc::new(RealProcessRunner),
+            Arc::new(RealProcessRunner::with_cancel(cancel.clone())),
             cpu_lane_permits,
             gpu_lane_permits,
+            cancel.clone(),
         );
 
         Some(Self {
@@ -157,6 +165,9 @@ impl RunState {
             notes,
             first_frame: frame_range.map_or(0, |(first, _)| first),
             frame_rate: reference.info.frame_rate,
+            progress: None,
+            total_frames: measured_frame_count(reference.info.nb_frames, frame_range),
+            cancel,
         })
     }
 
@@ -165,7 +176,9 @@ impl RunState {
     pub fn poll(&mut self) -> bool {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
-                SupervisorEvent::Progress { .. } => {}
+                SupervisorEvent::Progress { metric, frame, .. } => {
+                    self.progress = Some((metric, frame));
+                }
                 SupervisorEvent::MetricReady {
                     encode,
                     metric,
@@ -191,6 +204,22 @@ impl RunState {
         self.encodes_remaining > 0
     }
 
+    /// Stops the run. Queued work is dropped and the running process is killed at its
+    /// next progress line. Whatever already finished stays on screen.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    /// How far the run has reached, from 0.0 to 1.0, when the frame count is known.
+    pub fn fraction(&self) -> Option<f32> {
+        let (_, frame) = self.progress?;
+        let total = self.total_frames?;
+        if total == 0 {
+            return None;
+        }
+        Some((frame as f32 / total as f32).clamp(0.0, 1.0))
+    }
+
     #[cfg(test)]
     fn for_test(encodes_remaining: usize, receiver: Receiver<SupervisorEvent>) -> Self {
         Self {
@@ -202,7 +231,19 @@ impl RunState {
             notes: Vec::new(),
             first_frame: 0,
             frame_rate: vqa_core::media::Rational { num: 25, den: 1 },
+            progress: None,
+            total_frames: None,
+            cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+}
+
+/// How many frames one metric actually measures, once the range selection applies.
+fn measured_frame_count(nb_frames: Option<u64>, frame_range: Option<(u64, u64)>) -> Option<u64> {
+    match frame_range {
+        Some((first, last)) if last >= first => Some(last - first + 1),
+        Some(_) => None,
+        None => nb_frames,
     }
 }
 

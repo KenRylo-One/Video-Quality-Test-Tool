@@ -284,8 +284,15 @@ fn read_pointer(
     let plot_left = response.rect.min.x + scene.plot.x;
     let share = ((pointer.x - plot_left) / scene.plot.w).clamp(0.0, 1.0);
 
-    let notches = ui.input(|input| input.smooth_scroll_delta.y);
-    if notches.abs() > 0.1 {
+    // The plot sits on a page that scrolls, so a bare wheel belongs to the page. Zoom
+    // takes the modifier, or the reader cannot scroll past the plot without moving it.
+    let (notches, zooming) = ui.input(|input| {
+        (
+            input.smooth_scroll_delta.y,
+            input.modifiers.ctrl || input.modifiers.command,
+        )
+    });
+    if zooming && notches.abs() > 0.1 {
         state.zoom(notches.signum(), share);
     }
 
@@ -369,7 +376,7 @@ fn hover_readout(
     ui.add_space(4.0);
     let Some(frame) = state.hover_frame else {
         ui.label(sans(
-            "Hover the plot to read one frame.",
+            "Hover the plot to read one frame. Hold Ctrl and use the wheel to zoom.",
             11.0,
             tokens.text_muted,
         ));

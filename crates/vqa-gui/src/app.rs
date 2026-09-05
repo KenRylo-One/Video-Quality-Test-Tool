@@ -112,7 +112,19 @@ impl VqaApp {
 
                         ui.add_space(8.0);
                         if self.run.as_ref().is_some_and(RunState::is_running) {
-                            ui.label(sans("Running…", 12.5, self.tokens.text));
+                            if ui
+                                .add(
+                                    egui::Button::new(sans("Cancel", 12.0, self.tokens.text_muted))
+                                        .fill(self.tokens.window)
+                                        .stroke(egui::Stroke::new(1.0, self.tokens.border)),
+                                )
+                                .clicked()
+                                && let Some(run_state) = &self.run
+                            {
+                                run_state.cancel();
+                            }
+                            ui.add_space(10.0);
+                            self.run_progress(ui);
                         } else {
                             let can_run = self.session.files.reference().is_some()
                                 && !self.session.runnable_metrics().is_empty();
@@ -132,6 +144,58 @@ impl VqaApp {
                     });
                 });
             });
+    }
+
+    /// Dims the page behind the Settings panel, and reports a click on that dimming.
+    ///
+    /// The overlay is a real surface, not paint. It has to take the click, or a button
+    /// underneath answers it and the panel stays open over a page that just changed.
+    fn dim_behind_settings(&self, context: &egui::Context) -> bool {
+        let mut behind = context.viewport_rect();
+        behind.max.x -= settings_panel::WIDTH;
+        if behind.width() <= 0.0 {
+            return false;
+        }
+
+        egui::Area::new(egui::Id::new("settings-overlay"))
+            .order(egui::Order::Middle)
+            .fixed_pos(behind.min)
+            .show(context, |ui| {
+                let (rect, response) = ui.allocate_exact_size(behind.size(), egui::Sense::click());
+                ui.painter()
+                    .rect_filled(rect, 0.0, egui::Color32::from_black_alpha(90));
+                response.clicked()
+            })
+            .inner
+    }
+
+    /// The metric a lane is on, how far it has reached, and a bar for the share.
+    ///
+    /// A back end that reports no frame still gets a name and a moving bar, because a
+    /// still bar reads as a stall rather than as a run with no counter.
+    fn run_progress(&self, ui: &mut egui::Ui) {
+        let Some(run_state) = &self.run else {
+            return;
+        };
+
+        let label = match run_state.progress {
+            Some((metric, frame)) => {
+                format!("{} · frame {frame}", metric.def().label)
+            }
+            None => "Running…".to_string(),
+        };
+        ui.label(mono(label, 11.0, self.tokens.text_secondary));
+        ui.add_space(10.0);
+
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(120.0, 6.0), egui::Sense::hover());
+        ui.painter()
+            .rect_filled(rect, crate::theme::RADIUS, self.tokens.sunken);
+        if let Some(share) = run_state.fraction() {
+            let mut filled = rect;
+            filled.set_width(rect.width() * share);
+            ui.painter()
+                .rect_filled(filled, crate::theme::RADIUS, self.tokens.accent);
+        }
     }
 
     /// The left column: the files, and the metric setup.
@@ -217,6 +281,9 @@ impl eframe::App for VqaApp {
                     }
                 });
             self.settings_ui = settings_ui;
+            if self.dim_behind_settings(&context) {
+                self.settings_ui.open = false;
+            }
         }
 
         egui::CentralPanel::default()
