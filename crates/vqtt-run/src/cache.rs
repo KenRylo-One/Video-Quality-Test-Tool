@@ -34,8 +34,7 @@ impl CapabilityCache {
 
     /// The file that holds the cache.
     pub fn file_path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "vqtt")
-            .map(|dirs| dirs.cache_dir().join("backends.json"))
+        crate::dirs::folder(crate::dirs::Kind::Cache).map(|folder| folder.join("backends.json"))
     }
 
     /// Reads the cache. A missing or unreadable file gives an empty cache.

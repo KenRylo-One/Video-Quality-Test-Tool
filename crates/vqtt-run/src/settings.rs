@@ -139,8 +139,7 @@ impl Default for Settings {
 impl Settings {
     /// The file that holds the settings.
     pub fn file_path() -> Option<PathBuf> {
-        directories::ProjectDirs::from("", "", "vqtt")
-            .map(|dirs| dirs.config_dir().join("settings.toml"))
+        crate::dirs::folder(crate::dirs::Kind::Config).map(|folder| folder.join("settings.toml"))
     }
 
     /// Reads the settings.

@@ -10,7 +10,6 @@ publish.workspace = true
 [dependencies]
 vqtt-core = { workspace = true }
 vqtt-backends = { workspace = true }
-directories = { workspace = true }
 resvg = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

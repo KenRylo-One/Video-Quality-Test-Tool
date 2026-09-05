@@ -5,6 +5,7 @@
 
 pub mod cache;
 pub mod csv_writer;
+pub mod dirs;
 pub mod export;
 pub mod frames;
 pub mod graph_png;
