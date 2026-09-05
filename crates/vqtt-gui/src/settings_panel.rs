@@ -91,6 +91,14 @@ pub fn show(ui: &mut Ui, tokens: &Tokens, session: &mut Session, state: &mut Set
         ui.label(mono("GENERAL", 10.5, tokens.text_muted));
         ui.add_space(4.0);
         changed |= general(ui, tokens, session);
+
+        // A bug report has to be able to name the build it came from.
+        ui.add_space(14.0);
+        ui.label(mono(
+            format!("{} {}", crate::app::APP_NAME, env!("CARGO_PKG_VERSION")),
+            10.0,
+            tokens.text_muted,
+        ));
     });
 
     changed
@@ -173,11 +181,14 @@ fn binary_row(
             tokens.text_muted,
         ));
         if session.inventory.get(id).is_none() {
-            ui.label(sans(
-                format!("Get it from {}.", id.source()),
-                11.0,
-                tokens.text_muted,
-            ));
+            ui.horizontal_wrapped(|ui| {
+                ui.label(sans("Get it from", 11.0, tokens.text_muted));
+                ui.hyperlink_to(sans(id.source(), 11.0, tokens.accent), id.source_url())
+                    .on_hover_text("Opens in your browser. This tool downloads nothing.");
+            });
+            if let Some(requirement) = id.source_requirement() {
+                ui.label(sans(requirement, 11.0, tokens.text_muted));
+            }
         }
     });
 }

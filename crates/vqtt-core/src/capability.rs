@@ -77,15 +77,36 @@ impl BinaryId {
         }
     }
 
-    /// Where to get it. The tool never downloads anything.
+    /// The site that has it. The tool never downloads anything.
     pub fn source(self) -> &'static str {
         match self {
-            Self::Ffmpeg | Self::Ffprobe => {
-                "ffmpeg.org, version 7.1 or later, built with --enable-libvmaf"
-            }
+            Self::Ffmpeg | Self::Ffprobe => "ffmpeg.org",
             Self::Vmaf => "github.com/Netflix/vmaf",
             Self::Ffvship => "codeberg.org/Line-fr/Vship",
             Self::Ssimulacra2Rs => "github.com/rust-av/ssimulacra2_bin",
+        }
+    }
+
+    /// The address of that site.
+    ///
+    /// The window opens this in the browser of the operating system. The tool itself
+    /// uses the network for nothing, which is NFR-7.
+    pub fn source_url(self) -> &'static str {
+        match self {
+            Self::Ffmpeg | Self::Ffprobe => "https://ffmpeg.org/download.html",
+            Self::Vmaf => "https://github.com/Netflix/vmaf",
+            Self::Ffvship => "https://codeberg.org/Line-fr/Vship",
+            Self::Ssimulacra2Rs => "https://github.com/rust-av/ssimulacra2_bin",
+        }
+    }
+
+    /// What the build must have, when the program alone is not enough.
+    pub fn source_requirement(self) -> Option<&'static str> {
+        match self {
+            Self::Ffmpeg | Self::Ffprobe => {
+                Some("Version 7.1 or later, built with --enable-libvmaf.")
+            }
+            _ => None,
         }
     }
 
