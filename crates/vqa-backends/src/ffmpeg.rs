@@ -568,6 +568,13 @@ fn ffmpeg_args(
         OsString::from("-y"),
         OsString::from("-v"),
         OsString::from("error"),
+        // `-v error` is quiet on purpose, so the frame counter has to be asked for.
+        // The progress blocks go to the error stream, which the supervisor already
+        // reads, and each one is a plain `key=value` line that no error text matches.
+        OsString::from("-progress"),
+        OsString::from("pipe:2"),
+        OsString::from("-stats_period"),
+        OsString::from("0.5"),
         OsString::from("-i"),
         encode_path.as_os_str().to_os_string(),
         OsString::from("-i"),
@@ -678,6 +685,17 @@ mod tests {
             .collect()
     }
 
+    /// The filter graph, found by the flag that carries it rather than by position, so
+    /// a new global option never renumbers every test in this file.
+    fn filter_graph_of(invocation: &Invocation) -> String {
+        let args = arg_strings(invocation);
+        let at = args
+            .iter()
+            .position(|arg| arg == "-lavfi")
+            .expect("every FFmpeg invocation carries a filter graph");
+        args[at + 1].clone()
+    }
+
     #[test]
     fn no_ffmpeg_family_metric_gives_no_invocation() {
         let job = identical_job(&[MetricId::Vmaf], false);
@@ -696,6 +714,10 @@ mod tests {
                 "-y",
                 "-v",
                 "error",
+                "-progress",
+                "pipe:2",
+                "-stats_period",
+                "0.5",
                 "-i",
                 "distorted.mkv",
                 "-i",
@@ -718,7 +740,7 @@ mod tests {
     fn identical_media_info_fires_no_correction() {
         let job = identical_job(&[MetricId::PsnrY], false);
         let invocation = &plan(&job).unwrap()[0];
-        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(invocation);
         assert!(filter_graph.contains("[0:v]setpts=PTS-STARTPTS[distorted_pad]"));
         assert!(!filter_graph.contains("scale="));
         assert!(!filter_graph.contains("zscale="));
@@ -731,7 +753,7 @@ mod tests {
         let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Pc, 150);
         let job = job_with(&[MetricId::PsnrY], false, reference, encode);
         let invocation = &plan(&job).unwrap()[0];
-        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(invocation);
 
         assert!(filter_graph.contains("[0:v]setpts=PTS-STARTPTS,zscale=in_range=full:out_range=limited,format=yuv420p[distorted_pad]"));
         assert!(filter_graph.contains("[1:v]setpts=PTS-STARTPTS[reference_pad]"));
@@ -743,7 +765,7 @@ mod tests {
         let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Tv, 150);
         let job = job_with(&[MetricId::PsnrY], false, reference, encode);
         let invocation = &plan(&job).unwrap()[0];
-        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(invocation);
 
         assert!(
             filter_graph
@@ -758,7 +780,7 @@ mod tests {
         let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Tv, 140);
         let job = job_with(&[MetricId::PsnrY], false, reference, encode);
         let invocation = &plan(&job).unwrap()[0];
-        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(invocation);
 
         assert!(
             filter_graph.contains(
@@ -779,7 +801,7 @@ mod tests {
         let mut job = job_with(&[MetricId::PsnrY], false, reference, encode);
         job.frame_range = Some((10, 49));
         let invocation = &plan(&job).unwrap()[0];
-        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(invocation);
 
         assert!(filter_graph.contains("trim=start_frame=10:end_frame=50"));
     }
@@ -795,7 +817,7 @@ mod tests {
             ..CorrectionToggles::default()
         };
         let invocation = &plan_with_toggles(&job, toggles).unwrap()[0];
-        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(invocation);
         assert!(!filter_graph.contains("zscale="));
     }
 
@@ -814,14 +836,14 @@ mod tests {
         // by zero when it reads a frame through a `split` copy. It always gets its own
         // invocation, so the fused pass here only carries PSNR and SSIM, split=2.
         assert_eq!(invocations.len(), 2);
-        let filter_graph = arg_strings(&invocations[0]).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(&invocations[0]);
 
         assert!(filter_graph.starts_with(
             "[0:v]setpts=PTS-STARTPTS,scale=3840:2160:flags=bicubic,zscale=in_range=full:out_range=limited,format=yuv420p,split=2"
         ));
         assert!(!filter_graph.contains("xpsnr"));
 
-        let xpsnr_graph = arg_strings(&invocations[1]).into_iter().nth(8).unwrap();
+        let xpsnr_graph = filter_graph_of(&invocations[1]);
         assert!(xpsnr_graph.contains("xpsnr=stats_file="));
     }
 
@@ -840,7 +862,7 @@ mod tests {
         let mut job = job_with(&[MetricId::Vmaf], false, info.clone(), info);
         job.vmaf_models = vec![v1_model("model/vmaf_v1.0.16", "vmaf_v1.0.16_3d0h.json")];
         let invocation = &plan(&job).unwrap()[0];
-        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(invocation);
 
         assert!(
             filter_graph.starts_with("[0:v]setpts=PTS-STARTPTS,format=yuv420p10le[distorted_pad]")
@@ -860,7 +882,7 @@ mod tests {
         let mut job = job_with(&[MetricId::Vmaf], false, info.clone(), info);
         job.vmaf_models = vec![v1_model("model/vmaf_v1.0.16", "vmaf_v1.0.16_3d0h.json")];
         let invocation = &plan(&job).unwrap()[0];
-        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(invocation);
 
         assert!(
             filter_graph.contains("model=path='vmaf_v1.0.16_3d0h.json'"),
@@ -912,7 +934,7 @@ mod tests {
         let encode = media_info("distorted.mkv", 1920, 1080, ColorRange::Tv, 150);
         let job = job_with(&[MetricId::Cambi], false, reference, encode);
         let invocation = &plan(&job).unwrap()[0];
-        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(invocation);
 
         assert!(
             filter_graph
@@ -924,7 +946,7 @@ mod tests {
     fn cambi_ticked_against_an_unscaled_encode_adds_no_encode_size_option() {
         let job = identical_job(&[MetricId::Cambi], false);
         let invocation = &plan(&job).unwrap()[0];
-        let filter_graph = arg_strings(invocation).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(invocation);
 
         assert!(!filter_graph.contains("cambi.enc_width"));
     }
@@ -935,10 +957,7 @@ mod tests {
         let invocations = plan(&job).unwrap();
         assert_eq!(invocations.len(), 2);
 
-        let graphs: Vec<String> = invocations
-            .iter()
-            .map(|invocation| arg_strings(invocation).into_iter().nth(8).unwrap())
-            .collect();
+        let graphs: Vec<String> = invocations.iter().map(filter_graph_of).collect();
         assert!(
             graphs
                 .iter()
@@ -973,7 +992,7 @@ mod tests {
             1,
             "every extra feature must ride on the one v1 pass"
         );
-        let filter_graph = arg_strings(&invocations[0]).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(&invocations[0]);
         assert!(filter_graph.contains("feature=name=psnr_hvs|name=ciede|name=float_ms_ssim"));
     }
 
@@ -982,7 +1001,7 @@ mod tests {
         let job = identical_job(&[MetricId::PsnrHvs], false);
         let invocations = plan(&job).unwrap();
         assert_eq!(invocations.len(), 1);
-        let filter_graph = arg_strings(&invocations[0]).into_iter().nth(8).unwrap();
+        let filter_graph = filter_graph_of(&invocations[0]);
         assert!(filter_graph.contains("feature=name=psnr_hvs"));
         assert!(!filter_graph.contains("model="));
     }

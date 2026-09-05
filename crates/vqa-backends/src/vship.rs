@@ -154,6 +154,9 @@ fn ffvship_args(
         OsString::from(metric_flag),
         OsString::from("--json"),
         json_path.as_os_str().to_os_string(),
+        // Gives the frame counter something to read. `--json` still writes every
+        // value, so this only feeds progress and never the result.
+        OsString::from("--live-score-output"),
     ];
     if let Some((first, last)) = frame_range {
         args.push(OsString::from("--start"));
@@ -344,6 +347,19 @@ mod tests {
             let args = arg_strings(&invocation);
             let index = args.iter().position(|arg| arg == "--gpu-threads").unwrap();
             assert_eq!(args[index + 1], "1");
+        }
+    }
+
+    #[test]
+    fn every_invocation_asks_for_a_live_score_so_the_gpu_lane_can_report_frames() {
+        let job = identical_job(&[MetricId::Ssimulacra2, MetricId::Butteraugli3Norm]);
+        for invocation in plan(&job).unwrap() {
+            let args = arg_strings(&invocation);
+            assert!(args.iter().any(|arg| arg == "--live-score-output"));
+            assert!(
+                args.iter().any(|arg| arg == "--json"),
+                "the values still come from the json file, never from the live output"
+            );
         }
     }
 
