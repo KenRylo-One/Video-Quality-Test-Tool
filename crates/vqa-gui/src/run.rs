@@ -22,6 +22,12 @@ pub struct RunState {
     pub failures: Vec<String>,
     /// Every correction and note for this run, as one flat, ready-to-show list.
     pub notes: Vec<String>,
+    /// The same corrections and notes with their structure intact. The Notes section
+    /// wants a sentence; the run record wants the id, the target and the detail.
+    corrections: Vec<corrections::Correction>,
+    structured_notes: Vec<corrections::Note>,
+    /// Every command that ran, in the order the supervisor queued it.
+    invocations: Vec<vqa_run::InvocationRecord>,
     /// The absolute frame number that sample zero of every series holds. The plot's
     /// horizontal axis reads real frame numbers, not offsets into a clamped range.
     pub first_frame: u64,
@@ -32,6 +38,13 @@ pub struct RunState {
     running: BTreeMap<(FileId, MetricId), u64>,
     /// How many frames one metric covers, for the progress bar.
     pub total_frames: Option<u64>,
+    /// The identity of this run, which names its export folder.
+    pub run_id: String,
+    pub started: String,
+    /// The model that VMAF measured with, for the record.
+    vmaf_model: Option<vqa_core::vmaf_model::VmafModel>,
+    metrics: Vec<MetricId>,
+    frame_range: Option<(u64, u64)>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -53,13 +66,12 @@ impl RunState {
             Some((session.selection.first_frame, session.selection.last_frame))
         };
 
-        let run_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|duration| duration.as_millis())
-            .unwrap_or(0);
+        let now = std::time::SystemTime::now();
+        let run_id = vqa_run::record::run_id(now);
+        let started = vqa_run::record::timestamp(now);
         let work_dir = std::env::temp_dir()
             .join("vqa-run")
-            .join(run_id.to_string());
+            .join(vqa_run::record::safe_name(&run_id));
 
         let vmaf_model_folder =
             vqa_run::vmaf_models::find_model_folder(session.settings.vmaf_model_folder.as_deref());
@@ -71,6 +83,8 @@ impl RunState {
 
         let mut work = Vec::new();
         let mut notes = Vec::new();
+        let mut corrections_made = Vec::new();
+        let mut structured_notes = Vec::new();
 
         let wants_vmaf_v1 =
             metrics.contains(&MetricId::Vmaf) || metrics.contains(&MetricId::VmafV1Cambi);
@@ -126,11 +140,11 @@ impl RunState {
                 vmaf_viewing_distance,
             );
             notes.extend(detected.display_lines());
-            notes.extend(
-                corrections::detect_vship_gap_notes(&metrics, &detected.corrections)
-                    .into_iter()
-                    .map(|note| note.message),
-            );
+            let gap_notes = corrections::detect_vship_gap_notes(&metrics, &detected.corrections);
+            notes.extend(gap_notes.iter().map(|note| note.message.clone()));
+            structured_notes.extend(detected.notes.iter().cloned());
+            structured_notes.extend(gap_notes);
+            corrections_made.extend(detected.corrections);
 
             work.push(EncodeWork {
                 encode: encode.id,
@@ -143,7 +157,8 @@ impl RunState {
         }
 
         for note in corrections::known_metric_fault_notes(&metrics) {
-            notes.push(note.message);
+            notes.push(note.message.clone());
+            structured_notes.push(note);
         }
 
         let encodes_remaining = work.len();
@@ -165,10 +180,23 @@ impl RunState {
             series: HashMap::new(),
             failures: Vec::new(),
             notes,
+            corrections: corrections_made,
+            structured_notes,
+            invocations: Vec::new(),
             first_frame: frame_range.map_or(0, |(first, _)| first),
             frame_rate: reference.info.frame_rate,
             running: BTreeMap::new(),
             total_frames: measured_frame_count(reference.info.nb_frames, frame_range),
+            run_id,
+            started,
+            vmaf_model: vqa_core::vmaf_model::choose_model(
+                &vmaf_models,
+                reference.info.height,
+                vmaf_viewing_distance,
+            )
+            .cloned(),
+            metrics: metrics.iter().copied().collect(),
+            frame_range,
             cancel,
         })
     }
@@ -190,6 +218,9 @@ impl RunState {
                 }
                 SupervisorEvent::ItemDone { encode, metric } => {
                     self.running.remove(&(encode, metric));
+                }
+                SupervisorEvent::Ran { record, .. } => {
+                    self.invocations.push(record);
                 }
                 SupervisorEvent::MetricReady {
                     encode,
@@ -263,6 +294,31 @@ impl RunState {
         Some((frame as f32 / total as f32).clamp(0.0, 1.0))
     }
 
+    /// Everything the export needs, taken from a run that has stopped.
+    ///
+    /// The invocation order is the order the supervisor queued the work, not the order
+    /// the lanes happened to finish, so the log reads the way the plan does.
+    pub fn outcome(&self, theme: vqa_core::palette::Theme) -> vqa_run::RunOutcome {
+        let mut invocations = self.invocations.clone();
+        invocations.sort_by_key(|record| record.seq);
+
+        vqa_run::RunOutcome {
+            run_id: self.run_id.clone(),
+            started: self.started.clone(),
+            finished: vqa_run::record::timestamp(std::time::SystemTime::now()),
+            metrics: self.metrics.clone(),
+            frame_range: self.frame_range,
+            first_frame: self.first_frame,
+            results: self.results.clone(),
+            series: self.series.clone(),
+            corrections: self.corrections.clone(),
+            notes: self.structured_notes.clone(),
+            invocations,
+            vmaf_model: self.vmaf_model.clone(),
+            theme,
+        }
+    }
+
     #[cfg(test)]
     fn for_test(encodes_remaining: usize, receiver: Receiver<SupervisorEvent>) -> Self {
         Self {
@@ -272,10 +328,18 @@ impl RunState {
             series: HashMap::new(),
             failures: Vec::new(),
             notes: Vec::new(),
+            corrections: Vec::new(),
+            structured_notes: Vec::new(),
+            invocations: Vec::new(),
             first_frame: 0,
             frame_rate: vqa_core::media::Rational { num: 25, den: 1 },
             running: BTreeMap::new(),
             total_frames: None,
+            run_id: "test-run".to_string(),
+            started: "test".to_string(),
+            vmaf_model: None,
+            metrics: Vec::new(),
+            frame_range: None,
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }

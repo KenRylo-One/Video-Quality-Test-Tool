@@ -40,6 +40,8 @@ pub struct VqaApp {
     run: Option<RunState>,
     /// A binary search running on a worker thread.
     scan: Option<std::sync::mpsc::Receiver<vqa_run::BinaryScan>>,
+    /// What the last export did, as one line for the Notes section.
+    export_report: Option<String>,
 }
 
 impl VqaApp {
@@ -65,7 +67,58 @@ impl VqaApp {
             plot_ui: PlotUi::default(),
             run: None,
             scan: None,
+            export_report: None,
         }
+    }
+
+    /// The Notes lines, plus whatever the last export had to say.
+    fn note_lines(&self) -> Vec<String> {
+        let mut lines = self
+            .run
+            .as_ref()
+            .map(RunState::note_lines)
+            .unwrap_or_default();
+        if let Some(report) = &self.export_report {
+            lines.push(report.clone());
+        }
+        lines
+    }
+
+    /// Writes the run to a folder the user chooses, and remembers it for next time.
+    ///
+    /// The folder picker only appears when Settings holds no export folder yet, so a
+    /// second export takes one click.
+    fn export_run(&mut self) {
+        let Some(run_state) = &self.run else {
+            return;
+        };
+
+        let parent = match &self.session.settings.export_folder {
+            Some(folder) => folder.clone(),
+            None => {
+                let Some(chosen) = rfd::FileDialog::new().pick_folder() else {
+                    return;
+                };
+                self.session.settings.export_folder = Some(chosen.clone());
+                self.session.save_settings();
+                chosen
+            }
+        };
+
+        let outcome = run_state.outcome(self.tokens.theme);
+        self.export_report = Some(match vqa_run::write_run(
+            &parent,
+            &self.session,
+            &outcome,
+            crate::fonts::FACES,
+        ) {
+            Ok(exported) => format!(
+                "Wrote {} files to {}.",
+                exported.files.len(),
+                exported.folder.display()
+            ),
+            Err(error) => format!("The export did not finish: {error}"),
+        });
     }
 
     /// Adds every file that the user dropped on the window.
@@ -333,6 +386,7 @@ impl eframe::App for VqaApp {
             }
         }
 
+        let mut asked_to_export = false;
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::default()
@@ -352,17 +406,30 @@ impl eframe::App for VqaApp {
                                 series: &run_state.series,
                                 first_frame: run_state.first_frame,
                                 frame_rate: run_state.frame_rate,
+                                is_running: run_state.is_running(),
                             },
                             None => right::RunView {
                                 results: &empty_results,
                                 series: &empty_series,
                                 first_frame: 0,
                                 frame_rate: vqa_core::media::Rational::ZERO,
+                                is_running: false,
                             },
                         };
-                        ui.vertical(|ui| {
-                            right::show(ui, &self.tokens, &self.session, &view, &mut self.plot_ui)
-                        });
+                        let request = ui
+                            .vertical(|ui| {
+                                right::show(
+                                    ui,
+                                    &self.tokens,
+                                    &self.session,
+                                    &view,
+                                    &mut self.plot_ui,
+                                )
+                            })
+                            .inner;
+                        if request == right::Request::Export {
+                            asked_to_export = true;
+                        }
                     });
 
                     // A run that measured nothing still has notes worth reading. That
@@ -371,9 +438,15 @@ impl eframe::App for VqaApp {
                         && run_state.has_something_to_say()
                     {
                         ui.add_space(SECTION_GAP);
-                        notes::show(ui, &self.tokens, &run_state.note_lines());
+                        notes::show(ui, &self.tokens, &self.note_lines());
                     }
                 });
             });
+
+        // The export writes files and can open a folder picker, so it runs after the
+        // frame rather than inside the closure that is still borrowing the session.
+        if asked_to_export {
+            self.export_run();
+        }
     }
 }

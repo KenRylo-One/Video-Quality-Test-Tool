@@ -82,16 +82,34 @@ pub struct RunView<'a> {
     pub series: &'a HashMap<(FileId, MetricId), Vec<f32>>,
     pub first_frame: u64,
     pub frame_rate: Rational,
+    /// True while the run is still working. Export waits for it, because a record
+    /// written half way through would name numbers that are still moving.
+    pub is_running: bool,
 }
 
-pub fn show(ui: &mut Ui, tokens: &Tokens, session: &Session, run: &RunView, state: &mut PlotUi) {
+/// What the right column asks the window to do after this frame is drawn.
+#[derive(Default, PartialEq)]
+pub enum Request {
+    #[default]
+    Nothing,
+    Export,
+}
+
+pub fn show(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    session: &Session,
+    run: &RunView,
+    state: &mut PlotUi,
+) -> Request {
     section_header(ui, tokens, "Plot");
 
     let finished = finished_metrics(session, run);
+    let mut request = Request::Nothing;
     if finished.is_empty() {
         empty_state(ui, tokens, "Run a comparison to see the plot.", PLOT_HEIGHT);
     } else {
-        plot_section(ui, tokens, session, run, state, &finished);
+        request = plot_section(ui, tokens, session, run, state, &finished);
     }
 
     ui.add_space(16.0);
@@ -100,9 +118,10 @@ pub fn show(ui: &mut Ui, tokens: &Tokens, session: &Session, run: &RunView, stat
 
     if run.results.is_empty() {
         empty_state(ui, tokens, "The numbers appear here.", 120.0);
-        return;
+        return request;
     }
     numbers_table(ui, tokens, session, run.results);
+    request
 }
 
 /// Every metric that has a result, in registry order, so the tabs never reshuffle.
@@ -126,7 +145,7 @@ fn plot_section(
     run: &RunView,
     state: &mut PlotUi,
     finished: &[MetricId],
-) {
+) -> Request {
     let active = match state.active_tab {
         Some(metric) if finished.contains(&metric) => metric,
         _ => finished[0],
@@ -154,10 +173,12 @@ fn plot_section(
     });
     ui.add_space(8.0);
 
+    let mut request = Request::Nothing;
     card(ui, tokens, |ui| {
         ui.set_width(ui.available_width());
-        plot_card(ui, tokens, session, run, state, active);
+        request = plot_card(ui, tokens, session, run, state, active);
     });
+    request
 }
 
 fn plot_card(
@@ -167,7 +188,7 @@ fn plot_card(
     run: &RunView,
     state: &mut PlotUi,
     active: MetricId,
-) {
+) -> Request {
     let names: Vec<(FileId, Option<usize>, String)> = session
         .files
         .encodes()
@@ -183,9 +204,23 @@ fn plot_card(
         .collect();
     let crowded = session.files.encodes().count() > CROWDED_ABOVE;
 
+    let mut asked = Request::Nothing;
     ui.horizontal(|ui| {
         ui.label(mono(active.def().label, 14.0, tokens.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let export = ui
+                .add_enabled(
+                    !run.is_running,
+                    egui::Button::new(sans("export", 11.0, tokens.text_secondary)).frame(false),
+                )
+                .on_hover_text(
+                    "Writes the record, both CSV files, the command log and a graph for \
+each metric into one folder.",
+                )
+                .on_disabled_hover_text("The run is still working.");
+            if export.clicked() {
+                asked = Request::Export;
+            }
             if ui
                 .add(
                     egui::Button::new(sans("zoom reset", 11.0, tokens.text_secondary)).frame(false),
@@ -262,6 +297,7 @@ fn plot_card(
     ui.add_space(6.0);
     legend(ui, tokens, session, state, active, run);
     hover_readout(ui, tokens, state, &inputs, active, run);
+    asked
 }
 
 /// Turns the pointer into a hovered frame and a zoom level.

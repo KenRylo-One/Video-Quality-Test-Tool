@@ -21,6 +21,16 @@ pub const SANS_SEMIBOLD_FAMILY: &str = "IBM Plex Sans SemiBold";
 /// The name of the monospace family, at SemiBold weight.
 pub const MONO_SEMIBOLD_FAMILY: &str = "IBM Plex Mono SemiBold";
 
+/// The faces an exported graph is drawn with.
+///
+/// The rasterizer reads its own font database, so the export hands it the same files
+/// the window draws with rather than hoping the machine has them installed.
+pub const FACES: &[&[u8]] = &[
+    include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf"),
+];
+
 /// Builds the font table that the window loads at startup.
 pub fn definitions() -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
