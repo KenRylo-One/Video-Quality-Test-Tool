@@ -699,4 +699,90 @@ mod tests {
             state.failures
         );
     }
+
+    /// A real measurement, exported the way the Export button exports it, then read
+    /// back. This is the only test that walks the whole path: measure, pool, record,
+    /// write, and open again.
+    #[test]
+    fn a_real_run_exports_a_folder_that_reads_back() {
+        let media_folder =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Test-Media");
+        let reference_path = media_folder.join("TEST_B_limited_range_flagged_tv.mp4");
+        let encode_path = media_folder.join("TEST_A_full_range_flagged_pc.mp4");
+        if !reference_path.is_file() || !encode_path.is_file() {
+            return;
+        }
+
+        let mut session = vqa_run::Session::with_settings(
+            vqa_run::Settings::default(),
+            vqa_run::CapabilityCache::new(),
+        );
+        if !session.inventory.has(vqa_core::BinaryId::Ffmpeg)
+            || !session.inventory.has(vqa_core::BinaryId::Ffprobe)
+        {
+            return;
+        }
+
+        session.add_file(&reference_path);
+        session.add_file(&encode_path);
+        session.toggle_metric(MetricId::PsnrY, true);
+        session.toggle_metric(MetricId::SsimAll, true);
+
+        let Some(mut state) = RunState::start(&session) else {
+            panic!("a reference, an encode, and a runnable metric are all present");
+        };
+        while state.poll() {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let parent = std::env::temp_dir().join("vqa-export-real");
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+
+        let outcome = state.outcome(vqa_core::palette::Theme::Dark);
+        let exported =
+            vqa_run::write_run(&parent, &session, &outcome, crate::fonts::FACES).unwrap();
+
+        for name in &exported.files {
+            let path = exported.folder.join(name);
+            let bytes = std::fs::metadata(&path).map(|data| data.len()).unwrap_or(0);
+            assert!(bytes > 0, "{name} was written empty");
+        }
+
+        let text = std::fs::read_to_string(exported.folder.join("run.json")).unwrap();
+        let record: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(record["schema"], 1);
+        assert!(
+            record["backends"]
+                .as_array()
+                .is_some_and(|list| !list.is_empty()),
+            "the record must name the binary that measured"
+        );
+        assert!(
+            record["invocations"]
+                .as_array()
+                .is_some_and(|list| !list.is_empty()),
+            "the record must hold every command that ran"
+        );
+
+        let frames = exported
+            .files
+            .iter()
+            .find(|name| name.starts_with("frames-"))
+            .expect("one per-frame file for the encode");
+        let wide = std::fs::read_to_string(exported.folder.join(frames)).unwrap();
+        let header = wide.lines().next().unwrap();
+        assert!(header.starts_with("frame,"), "{header}");
+        assert!(header.contains("psnr_y") && header.contains("ssim_all"));
+        assert_eq!(
+            wide.lines().count(),
+            151,
+            "150 frames and one header row, on one time axis"
+        );
+
+        let svg = std::fs::read_to_string(exported.folder.join("graph-psnr_y.svg")).unwrap();
+        assert!(svg.starts_with("<svg "));
+        assert!(svg.trim_end().ends_with("</svg>"));
+        assert!(svg.contains("<polyline"), "the graph must draw its line");
+    }
 }
