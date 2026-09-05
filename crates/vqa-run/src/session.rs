@@ -76,18 +76,27 @@ impl Session {
         Self::with_settings(Settings::load(), CapabilityCache::load())
     }
 
-    /// Builds a session from a known settings value.
+    /// Builds a session and looks for every binary. This blocks.
     pub fn with_settings(settings: Settings, cache: CapabilityCache) -> Self {
-        let mut session = Self {
+        let mut session = Self::new(settings, cache);
+        session.refresh_inventory();
+        session
+    }
+
+    /// Builds a session that has not looked for a binary yet.
+    ///
+    /// The scan hashes each binary, and a full FFmpeg build is over a hundred megabytes,
+    /// so a caller that already runs `scan_binaries` on a worker thread starts here and
+    /// installs the answer with `apply_scan`.
+    pub fn new(settings: Settings, cache: CapabilityCache) -> Self {
+        Self {
             settings,
             inventory: Inventory::new(),
             files: ComparisonSet::new(),
             selection: Selection::default(),
             probe_problems: Vec::new(),
             cache,
-        };
-        session.refresh_inventory();
-        session
+        }
     }
 
     /// Looks for every binary again, and reads the capabilities of each one.

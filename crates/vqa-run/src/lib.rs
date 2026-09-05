@@ -5,6 +5,7 @@
 
 pub mod cache;
 pub mod csv_writer;
+pub mod export;
 pub mod graph_png;
 pub mod record;
 pub mod session;
@@ -13,7 +14,8 @@ pub mod supervisor;
 pub mod vmaf_models;
 
 pub use cache::CapabilityCache;
-pub use csv_writer::{MetricColumn, write_frame_csv};
+pub use csv_writer::{MetricColumn, SummaryRow, write_frame_csv, write_summary_csv};
+pub use export::{Exported, write_run};
 pub use graph_png::png_from_svg;
 pub use record::{InvocationRecord, RunOutcome, RunRecord};
 pub use session::{BinaryScan, Selection, Session, scan_binaries};
