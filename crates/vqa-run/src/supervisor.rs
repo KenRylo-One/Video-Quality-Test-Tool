@@ -6,6 +6,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use vqa_backends::parse::stats_file::parse_stats_file;
+use crate::record::InvocationRecord;
 use vqa_core::backend::{BufferSink, Invocation, ProcessRunner, Progress};
 use vqa_core::capability::LaneKind;
 use vqa_core::metric::MetricId;
@@ -105,6 +106,7 @@ impl ProcessRunner for RealProcessRunner {
         Ok(vqa_core::backend::ExitReport {
             succeeded: status.success() && !cancelled,
             wall_time_ms: start_time.elapsed().as_millis() as u64,
+            exit_code: status.code(),
             message: message_of(&said),
         })
     }
@@ -184,6 +186,12 @@ pub enum SupervisorEvent {
         encode: FileId,
         metric: MetricId,
     },
+    /// What one command was, and how it ended. The run record and the command log are
+    /// built from these, so a failed invocation reports one too.
+    Ran {
+        encode: FileId,
+        record: InvocationRecord,
+    },
     MetricReady {
         encode: FileId,
         metric: MetricId,
@@ -209,6 +217,7 @@ pub struct EncodeWork {
 struct WorkItem {
     encode: FileId,
     invocation: Invocation,
+    seq: u32,
 }
 
 pub fn run_plan<R>(
@@ -249,6 +258,7 @@ where
     let mut cpu_queue = VecDeque::new();
     let mut gpu_queue = VecDeque::new();
 
+    let mut seq = 0u32;
     for encode_work in work {
         remaining_by_encode.insert(encode_work.encode, encode_work.invocations.len());
         for invocation in encode_work.invocations {
@@ -256,9 +266,11 @@ where
                 LaneKind::Cpu => &mut cpu_queue,
                 LaneKind::Gpu => &mut gpu_queue,
             };
+            seq += 1;
             queue.push_back(WorkItem {
                 encode: encode_work.encode,
                 invocation,
+                seq,
             });
         }
     }
@@ -365,8 +377,15 @@ fn run_one(item: &WorkItem, runner: &dyn ProcessRunner, sender: &Sender<Supervis
     };
 
     let outcome = runner.run(&item.invocation, &mut on_progress);
-    let exit_report = match outcome {
-        Ok(report) if report.succeeded => report,
+    let mut record = InvocationRecord::of(item.seq, &item.invocation);
+    if let Ok(report) = &outcome {
+        record.exit_code = report.exit_code;
+        record.wall_ms = report.wall_time_ms;
+    }
+    let _ = sender.send(SupervisorEvent::Ran { encode, record });
+
+    match outcome {
+        Ok(report) if report.succeeded => {}
         Ok(report) => {
             let _ = sender.send(SupervisorEvent::Failed {
                 encode,
@@ -381,8 +400,7 @@ fn run_one(item: &WorkItem, runner: &dyn ProcessRunner, sender: &Sender<Supervis
             });
             return;
         }
-    };
-    let _ = exit_report;
+    }
 
     for artifact in &item.invocation.expects {
         for metric in artifact.metrics.iter().copied() {
@@ -450,6 +468,7 @@ mod tests {
                 Ok(ExitReport {
                     succeeded: true,
                     wall_time_ms: 1,
+                    exit_code: Some(0),
                     message: None,
                 })
             } else {
@@ -607,6 +626,7 @@ mod tests {
         let item = WorkItem {
             encode: FileId(11),
             invocation: work.invocations.remove(0),
+            seq: 1,
         };
 
         let text = failure_text(&item, Some("OutOfVRAM: no GPU memory".to_string()));
@@ -638,6 +658,46 @@ mod tests {
                 ("done", MetricId::PsnrY),
             ]
         );
+    }
+
+    #[test]
+    fn every_command_that_ran_reports_itself_for_the_record() {
+        let stats_path = write_fixture("ran_record.log", "n:1 psnr_y:40.0\n");
+        let work = vec![psnr_invocation(FileId(8), stats_path)];
+        let receiver = run_plan(work, Arc::new(FakeRunner { succeed: true }), 1, 1);
+
+        let records: Vec<InvocationRecord> = receiver
+            .iter()
+            .filter_map(|event| match event {
+                SupervisorEvent::Ran { record, .. } => Some(record),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].seq, 1);
+        assert_eq!(records[0].lane, "cpu");
+        assert_eq!(records[0].exit_code, Some(0));
+        assert!(records[0].command_line().contains("ffmpeg"));
+    }
+
+    /// A back end that gave no number is the one the reader most needs the command for.
+    #[test]
+    fn a_command_that_failed_still_reports_itself() {
+        let stats_path = write_fixture("ran_failed.log", "n:1 psnr_y:40.0\n");
+        let work = vec![psnr_invocation(FileId(9), stats_path)];
+        let receiver = run_plan(work, Arc::new(FakeRunner { succeed: false }), 1, 1);
+
+        let mut ran = 0;
+        let mut failed = 0;
+        for event in receiver.iter() {
+            match event {
+                SupervisorEvent::Ran { .. } => ran += 1,
+                SupervisorEvent::Failed { .. } => failed += 1,
+                _ => {}
+            }
+        }
+        assert_eq!((ran, failed), (1, 1));
     }
 
     #[test]
