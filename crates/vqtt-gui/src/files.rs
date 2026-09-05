@@ -158,10 +158,10 @@ fn row(
         });
     });
 
-    if let Some(dragged) = response.response.dnd_release_payload::<FileId>() {
-        if *dragged != id {
-            *action = FilesAction::Move(*dragged, id);
-        }
+    if let Some(dragged) = response.response.dnd_release_payload::<FileId>()
+        && *dragged != id
+    {
+        *action = FilesAction::Move(*dragged, id);
     }
 }
 

@@ -125,22 +125,21 @@ pub fn bit_depth_from_pix_fmt(pix_fmt: &str) -> u8 {
     // Planar formats carry the depth after the last `p`: yuv420p10, p010.
     if let Some(index) = base.rfind('p') {
         let tail = &base[index + 1..];
-        if !tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit()) {
-            if let Ok(depth) = tail.parse::<u8>() {
-                if (8..=16).contains(&depth) {
-                    return depth;
-                }
-            }
+        if !tail.is_empty()
+            && tail.bytes().all(|b| b.is_ascii_digit())
+            && let Ok(depth) = tail.parse::<u8>()
+            && (8..=16).contains(&depth)
+        {
+            return depth;
         }
     }
 
     // Gray formats carry the depth directly: gray10, gray12.
-    if let Some(tail) = base.strip_prefix("gray") {
-        if let Ok(depth) = tail.parse::<u8>() {
-            if (8..=16).contains(&depth) {
-                return depth;
-            }
-        }
+    if let Some(tail) = base.strip_prefix("gray")
+        && let Ok(depth) = tail.parse::<u8>()
+        && (8..=16).contains(&depth)
+    {
+        return depth;
     }
 
     // Packed formats carry the total for every component: rgb24, rgba64, bgr48.
@@ -152,12 +151,12 @@ pub fn bit_depth_from_pix_fmt(pix_fmt: &str) -> u8 {
         ("rgb", 3),
         ("bgr", 3),
     ] {
-        if let Some(tail) = base.strip_prefix(prefix) {
-            if let Ok(total) = tail.parse::<u16>() {
-                let depth = total / u16::from(components);
-                if (8..=16).contains(&depth) {
-                    return depth as u8;
-                }
+        if let Some(tail) = base.strip_prefix(prefix)
+            && let Ok(total) = tail.parse::<u16>()
+        {
+            let depth = total / u16::from(components);
+            if (8..=16).contains(&depth) {
+                return depth as u8;
             }
         }
     }
@@ -216,10 +215,10 @@ impl MediaInfo {
 
     /// The frame count, from the container or from the duration.
     pub fn frame_count(&self) -> Option<u64> {
-        if let Some(count) = self.nb_frames {
-            if count > 0 {
-                return Some(count);
-            }
+        if let Some(count) = self.nb_frames
+            && count > 0
+        {
+            return Some(count);
         }
         let duration = self.duration_s?;
         let rate = self.frame_rate.as_f64();

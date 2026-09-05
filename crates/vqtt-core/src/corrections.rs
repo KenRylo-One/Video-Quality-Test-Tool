@@ -431,10 +431,10 @@ pub fn detect_all(
     }
     result.frame_range = frame_count.common_range;
 
-    if let Some(sample) = sample {
-        if let Some(note) = detect_range_flag_note(encode, sample, target_label) {
-            result.notes.push(note);
-        }
+    if let Some(sample) = sample
+        && let Some(note) = detect_range_flag_note(encode, sample, target_label)
+    {
+        result.notes.push(note);
     }
     if let Some(note) = detect_near_lossless_note(reference) {
         result.notes.push(note);

@@ -118,10 +118,10 @@ impl Session {
         self.inventory = scan.inventory;
         self.cache = scan.cache;
         self.tick_defaults();
-        if scan.cache_changed {
-            if let Err(error) = self.cache.save() {
-                tracing::warn!(%error, "cannot write the capability cache");
-            }
+        if scan.cache_changed
+            && let Err(error) = self.cache.save()
+        {
+            tracing::warn!(%error, "cannot write the capability cache");
         }
     }
 

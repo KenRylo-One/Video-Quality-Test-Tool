@@ -271,29 +271,29 @@ fn range_slider(ui: &mut Ui, tokens: &Tokens, first: &mut u64, last: &mut u64, t
     let handle_id = response.id.with("handle");
     let mut changed = false;
 
-    if response.drag_started() {
-        if let Some(pointer) = response.interact_pointer_pos() {
-            let nearest_low = (pointer.x - low).abs() <= (pointer.x - high).abs();
-            ui.memory_mut(|memory| memory.data.insert_temp(handle_id, nearest_low));
-        }
+    if response.drag_started()
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let nearest_low = (pointer.x - low).abs() <= (pointer.x - high).abs();
+        ui.memory_mut(|memory| memory.data.insert_temp(handle_id, nearest_low));
     }
 
-    if response.dragged() || response.clicked() {
-        if let Some(pointer) = response.interact_pointer_pos() {
-            let fraction = ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0);
-            let frame = (fraction * span).round() as u64;
-            let move_low = ui
-                .memory(|memory| memory.data.get_temp::<bool>(handle_id))
-                .unwrap_or((pointer.x - low).abs() <= (pointer.x - high).abs());
-            if move_low {
-                *first = frame.min(*last);
-                low = position(*first);
-            } else {
-                *last = frame.max(*first);
-                high = position(*last);
-            }
-            changed = true;
+    if (response.dragged() || response.clicked())
+        && let Some(pointer) = response.interact_pointer_pos()
+    {
+        let fraction = ((pointer.x - track.left()) / track.width()).clamp(0.0, 1.0);
+        let frame = (fraction * span).round() as u64;
+        let move_low = ui
+            .memory(|memory| memory.data.get_temp::<bool>(handle_id))
+            .unwrap_or((pointer.x - low).abs() <= (pointer.x - high).abs());
+        if move_low {
+            *first = frame.min(*last);
+            low = position(*first);
+        } else {
+            *last = frame.max(*first);
+            high = position(*last);
         }
+        changed = true;
     }
 
     let _ = (low, high);

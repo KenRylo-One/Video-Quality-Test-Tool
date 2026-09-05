@@ -463,65 +463,64 @@ fn libvmaf_invocations(
         .filter(|id| ticked.contains(id))
         .collect();
 
-    if !v1_metrics.is_empty() {
-        if let Some(invocation) = libvmaf_pass(
+    if !v1_metrics.is_empty()
+        && let Some(invocation) = libvmaf_pass(
             job,
             &v1_metrics,
             &std::mem::take(&mut v1_safe_extras),
             detected,
             frame_range,
             "vmaf_v1",
-        ) {
-            invocations.push(invocation);
-        }
+        )
+    {
+        invocations.push(invocation);
     }
 
-    if ticked.contains(&MetricId::VmafV0) {
-        if let Some(invocation) = libvmaf_pass(
+    if ticked.contains(&MetricId::VmafV0)
+        && let Some(invocation) = libvmaf_pass(
             job,
             &[MetricId::VmafV0],
             &[],
             detected,
             frame_range,
             "vmaf_v0",
-        ) {
-            invocations.push(invocation);
-        }
+        )
+    {
+        invocations.push(invocation);
     }
 
-    if ticked.contains(&MetricId::VmafNegV0) {
-        if let Some(invocation) = libvmaf_pass(
+    if ticked.contains(&MetricId::VmafNegV0)
+        && let Some(invocation) = libvmaf_pass(
             job,
             &[MetricId::VmafNegV0],
             &[],
             detected,
             frame_range,
             "vmaf_neg_v0",
-        ) {
-            invocations.push(invocation);
-        }
+        )
+    {
+        invocations.push(invocation);
     }
 
-    if ticked.contains(&MetricId::Cambi) {
-        if let Some(invocation) =
+    if ticked.contains(&MetricId::Cambi)
+        && let Some(invocation) =
             libvmaf_pass(job, &[], &[MetricId::Cambi], detected, frame_range, "cambi")
-        {
-            invocations.push(invocation);
-        }
+    {
+        invocations.push(invocation);
     }
 
     // v1_safe_extras is left over when no v1 pass ran to carry it.
-    if !v1_safe_extras.is_empty() {
-        if let Some(invocation) = libvmaf_pass(
+    if !v1_safe_extras.is_empty()
+        && let Some(invocation) = libvmaf_pass(
             job,
             &[],
             &v1_safe_extras,
             detected,
             frame_range,
             "vmaf_extra",
-        ) {
-            invocations.push(invocation);
-        }
+        )
+    {
+        invocations.push(invocation);
     }
 
     invocations
