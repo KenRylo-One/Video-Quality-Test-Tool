@@ -11,12 +11,12 @@ It never refuses to measure.
 The tool is a single window. It has no command line, no folder batch and no run history in
 version 1.0.
 
-## What you must install first
+## Programs used
 
 The tool ships no back end and downloads nothing. Get the programs you want, then point the
 tool at them in Settings. Only the first row is required.
 
-| Program | Gives you | Where |
+| Program | Metrics | Source |
 | --- | --- | --- |
 | FFmpeg and ffprobe | PSNR, SSIM, XPSNR, VMAF, CAMBI, and the media information of every file | [ffmpeg.org](https://ffmpeg.org/download.html) |
 | The VMAF models | VMAF v1, which needs a model file that matches your resolution | [github.com/Netflix/vmaf](https://github.com/Netflix/vmaf) |
@@ -41,39 +41,7 @@ operating system and to nowhere else.
 | macOS | `~/Library/Application Support/vqtt` |
 | Linux | `$XDG_CONFIG_HOME/vqtt`, or `~/.config/vqtt` |
 
-## A worked example
-
-This example makes its own two files, so you need no media of your own. It needs FFmpeg only.
-Both encoders below are built into every FFmpeg.
-
-1. Make a lossless reference and one lossy encode of it.
-
-   ```
-   ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=30:duration=10 -c:v ffv1 reference.mkv
-   ffmpeg -i reference.mkv -c:v mpeg4 -q:v 12 encode.mp4
-   ```
-
-2. Start `vqtt`. If Settings opens, give it the path of your `ffmpeg` and press **find**.
-
-3. Drop both files on the Files section, or press **Import videos**. The first file becomes
-   the reference. Click a file name to make a different file the reference.
-
-4. Tick the metrics you want. PSNR, SSIM and XPSNR need FFmpeg only. A metric that this
-   machine cannot run tells you which program it needs.
-
-5. Press **Run**. Each metric draws its graph as soon as it finishes. A run does not hold
-   every result until the last metric ends.
-
-6. Read the number. The Results table gives the mean, the median, the worst 5 percent, and
-   the range for each metric and each encode.
-
-7. Click the lowest point on a graph. The frame viewer opens under it and shows that frame
-   three ways: the reference, the encode, and the difference between them. Raise the gain to
-   see a small difference. Press **← worse** to step to the next worse frame.
-
-8. Press **export**. The tool asks once for a folder and remembers it.
-
-### What the export contains
+### Exporting
 
 The tool writes one folder for each run, named `vqtt-<run id>`.
 
@@ -87,19 +55,6 @@ The tool writes one folder for each run, named `vqtt-<run id>`.
 
 `frames-<encode>.csv` opens in a spreadsheet. It is the file to keep if you want to pool the
 values a different way later.
-
-## What the tool corrects, and why it tells you
-
-A metric compares two pictures. When the two files disagree about something, the comparison
-measures that disagreement instead of the compression. The tool finds these cases, corrects
-what it safely can, and names each correction in the Notes section under the graphs.
-
-The largest one is color range. A file flagged full range and a file flagged limited range
-differ by about 7 percent of the range in every pixel. That looks like a bad encoder and it
-is not. The tool converts one to match the other, and says so.
-
-FFVship reads the video files itself, so a filter cannot reach it. A metric measured by
-FFVship carries a note that names the corrections that did not run on it.
 
 ## Build from source
 
