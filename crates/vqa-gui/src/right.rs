@@ -93,6 +93,8 @@ pub enum Request {
     #[default]
     Nothing,
     Export,
+    /// Open the frame viewer on this encode, metric and frame.
+    OpenFrame(FileId, MetricId, u64),
 }
 
 pub fn show(
@@ -294,10 +296,56 @@ each metric into one folder.",
     }
 
     read_pointer(ui, &response, state, &scenes, run);
+    if response.clicked()
+        && let Some(opened) = clicked_frame(&response, &scenes, &inputs, active)
+    {
+        asked = opened;
+    }
     ui.add_space(6.0);
     legend(ui, tokens, session, state, active, run);
     hover_readout(ui, tokens, state, &inputs, active, run);
     asked
+}
+
+/// Turns a click into the frame the frame viewer opens.
+///
+/// The plot is decimated, so one pixel column can cover a hundred frames. The column
+/// already names the worst of them, which is what makes clicking a spike open the
+/// spike. The nearest line to the click decides which encode.
+fn clicked_frame(
+    response: &egui::Response,
+    scenes: &[vqa_core::plot::Scene],
+    inputs: &[SeriesInput],
+    active: MetricId,
+) -> Option<Request> {
+    let pointer = response.interact_pointer_pos()?;
+    let at = pointer - response.rect.min.to_vec2();
+
+    let mut best: Option<(f32, FileId, u64)> = None;
+    for scene in scenes {
+        let vqa_core::plot::Body::Lines(shapes) = &scene.body else {
+            continue;
+        };
+        for shape in shapes {
+            let Some(column) = shape
+                .columns
+                .iter()
+                .min_by(|left, right| {
+                    (left.x - at.x).abs().total_cmp(&(right.x - at.x).abs())
+                })
+            else {
+                continue;
+            };
+            let distance = (column.mean - at.y).abs() + (column.x - at.x).abs();
+            if best.is_none_or(|(closest, _, _)| distance < closest) {
+                best = Some((distance, shape.file, column.worst_frame));
+            }
+        }
+    }
+
+    let (_, file, frame) = best?;
+    inputs.iter().find(|input| input.file == file)?;
+    Some(Request::OpenFrame(file, active, frame))
 }
 
 /// Turns the pointer into a hovered frame and a zoom level.

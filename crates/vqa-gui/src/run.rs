@@ -28,6 +28,9 @@ pub struct RunState {
     structured_notes: Vec<corrections::Note>,
     /// Every command that ran, in the order the supervisor queued it.
     invocations: Vec<vqa_run::InvocationRecord>,
+    /// One job for each encode, kept so the frame viewer can extract a still through
+    /// the same correction chain the measurement used.
+    jobs: HashMap<FileId, MeasureJob>,
     /// The absolute frame number that sample zero of every series holds. The plot's
     /// horizontal axis reads real frame numbers, not offsets into a clamped range.
     pub first_frame: u64,
@@ -85,6 +88,7 @@ impl RunState {
         let mut notes = Vec::new();
         let mut corrections_made = Vec::new();
         let mut structured_notes = Vec::new();
+        let mut jobs: HashMap<FileId, MeasureJob> = HashMap::new();
 
         let wants_vmaf_v1 =
             metrics.contains(&MetricId::Vmaf) || metrics.contains(&MetricId::VmafV1Cambi);
@@ -146,6 +150,7 @@ impl RunState {
             structured_notes.extend(gap_notes);
             corrections_made.extend(detected.corrections);
 
+            jobs.insert(encode.id, job);
             work.push(EncodeWork {
                 encode: encode.id,
                 invocations,
@@ -183,6 +188,7 @@ impl RunState {
             corrections: corrections_made,
             structured_notes,
             invocations: Vec::new(),
+            jobs,
             first_frame: frame_range.map_or(0, |(first, _)| first),
             frame_rate: reference.info.frame_rate,
             running: BTreeMap::new(),
@@ -294,6 +300,24 @@ impl RunState {
         Some((frame as f32 / total as f32).clamp(0.0, 1.0))
     }
 
+    /// The job of one encode, so the frame viewer can extract through the same
+    /// correction chain the measurement used.
+    pub fn job_for(&self, encode: FileId) -> Option<MeasureJob> {
+        self.jobs.get(&encode).cloned()
+    }
+
+    /// The frames of one measurement, worst first.
+    pub fn worst_frames(
+        &self,
+        encode: FileId,
+        metric: MetricId,
+    ) -> Vec<vqa_core::frames::FrameValue> {
+        let Some(values) = self.series.get(&(encode, metric)) else {
+            return Vec::new();
+        };
+        vqa_core::frames::worst_frames(values, self.first_frame, metric.def().direction)
+    }
+
     /// Everything the export needs, taken from a run that has stopped.
     ///
     /// The invocation order is the order the supervisor queued the work, not the order
@@ -331,6 +355,7 @@ impl RunState {
             corrections: Vec::new(),
             structured_notes: Vec::new(),
             invocations: Vec::new(),
+            jobs: HashMap::new(),
             first_frame: 0,
             frame_rate: vqa_core::media::Rational { num: 25, den: 1 },
             running: BTreeMap::new(),

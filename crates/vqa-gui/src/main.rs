@@ -5,6 +5,7 @@
 mod app;
 mod files;
 mod fonts;
+mod frame_viewer;
 mod metrics;
 mod notes;
 mod plot;

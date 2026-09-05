@@ -95,8 +95,7 @@ pub const LIGHT: Tokens = Tokens {
 /// The flat gray behind the three frames of the frame viewer.
 ///
 /// This value is the same in both themes, and it is deliberate. A tinted surround changes
-/// how a person judges an image. A later milestone draws the frame viewer.
-#[allow(dead_code)]
+/// how a person judges an image.
 pub const FRAME_VIEWER_GRAY: Color32 = rgb(0x808080);
 
 impl Tokens {

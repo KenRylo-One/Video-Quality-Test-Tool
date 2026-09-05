@@ -42,6 +42,7 @@ pub struct VqaApp {
     scan: Option<std::sync::mpsc::Receiver<vqa_run::BinaryScan>>,
     /// What the last export did, as one line for the Notes section.
     export_report: Option<String>,
+    frame_viewer: crate::frame_viewer::FrameViewer,
 }
 
 impl VqaApp {
@@ -68,7 +69,54 @@ impl VqaApp {
             run: None,
             scan: None,
             export_report: None,
+            frame_viewer: crate::frame_viewer::FrameViewer::default(),
         }
+    }
+
+    /// Starts an extraction on a worker thread. An exact frame select on a long-GOP
+    /// file seeks to a keyframe and decodes forward, so the window never waits on it.
+    fn extract_frame(&mut self, frame: u64, gain: u32) {
+        let Some(encode) = self.frame_viewer.encode else {
+            return;
+        };
+        let Some(run_state) = &self.run else {
+            return;
+        };
+        let Some(job) = run_state.job_for(encode) else {
+            return;
+        };
+        let Some(program) = self
+            .session
+            .inventory
+            .get(vqa_core::capability::BinaryId::Ffmpeg)
+            .map(|found| found.path.clone())
+        else {
+            return;
+        };
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(vqa_run::extract_frame(&job, &program, frame, gain));
+        });
+        self.frame_viewer.expect(frame, receiver);
+    }
+
+    /// The note the viewer carries when the active tab is a Vship metric.
+    ///
+    /// FFVship reads the files itself, so the corrections never reach it. The picture
+    /// on screen is corrected and the score beside it was measured on pixels that were
+    /// not.
+    fn viewer_note(&self) -> Option<&'static str> {
+        let metric = self.frame_viewer.metric?;
+        let by_vship = metric
+            .def()
+            .providers
+            .first()
+            .is_some_and(|provider| provider.binary == vqa_core::capability::BinaryId::Ffvship);
+        by_vship.then_some(
+            "FFVship reads the files itself, so the colour range and resolution corrections \
+did not reach this score. The images below are corrected and the number is not.",
+        )
     }
 
     /// The Notes lines, plus whatever the last export had to say.
@@ -387,6 +435,8 @@ impl eframe::App for VqaApp {
         }
 
         let mut asked_to_export = false;
+        let mut open_frame = None;
+        let mut wants_frame = None;
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::default()
@@ -427,10 +477,35 @@ impl eframe::App for VqaApp {
                                 )
                             })
                             .inner;
-                        if request == right::Request::Export {
-                            asked_to_export = true;
+                        match request {
+                            right::Request::Export => asked_to_export = true,
+                            right::Request::OpenFrame(encode, metric, frame) => {
+                                open_frame = Some((encode, metric, frame));
+                            }
+                            right::Request::Nothing => {}
                         }
                     });
+
+                    if let Some(run_state) = &self.run
+                        && !run_state.series.is_empty()
+                    {
+                        ui.add_space(SECTION_GAP);
+                        self.frame_viewer.poll(ui);
+                        let note = self.viewer_note();
+                        if let crate::frame_viewer::Ask::Extract(frame, gain) =
+                            crate::frame_viewer::show(
+                                ui,
+                                &self.tokens,
+                                &mut self.frame_viewer,
+                                note,
+                            )
+                        {
+                            wants_frame = Some((frame, gain));
+                        }
+                        if self.frame_viewer.is_loading() {
+                            context.request_repaint_after(std::time::Duration::from_millis(120));
+                        }
+                    }
 
                     // A run that measured nothing still has notes worth reading. That
                     // is the run where the reader most needs to know what went wrong.
@@ -443,10 +518,20 @@ impl eframe::App for VqaApp {
                 });
             });
 
-        // The export writes files and can open a folder picker, so it runs after the
+        // These write files, start threads or open a picker, so they run after the
         // frame rather than inside the closure that is still borrowing the session.
         if asked_to_export {
             self.export_run();
+        }
+        if let Some((encode, metric, frame)) = open_frame
+            && let Some(run_state) = &self.run
+        {
+            let order = run_state.worst_frames(encode, metric);
+            self.frame_viewer.open_at(encode, metric, frame, order);
+            wants_frame = Some((frame, self.frame_viewer.gain.max(4)));
+        }
+        if let Some((frame, gain)) = wants_frame {
+            self.extract_frame(frame, gain);
         }
     }
 }
