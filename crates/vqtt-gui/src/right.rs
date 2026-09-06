@@ -209,7 +209,13 @@ fn plot_section(
         // The viewer belongs to the plot it was opened from, so it sits inside the
         // plot card under the hover readout, above the numbers.
         ui.add_space(10.0);
-        ask = crate::frame_viewer::show(ui, tokens, viewer, viewer_note);
+        // Every still is drawn at the size of the reference, so the viewer can hold
+        // the shape of the frame before it has fetched one.
+        let frame = session
+            .files
+            .reference()
+            .map(|file| egui::vec2(file.info.width as f32, file.info.height as f32));
+        ask = crate::frame_viewer::show(ui, tokens, viewer, viewer_note, frame);
     });
     Asked {
         request,

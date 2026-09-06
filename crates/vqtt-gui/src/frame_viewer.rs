@@ -264,7 +264,14 @@ fn load(ctx: &egui::Context, label: &'static str, path: &Path) -> Slot {
 }
 
 /// Draws the viewer and reports what the reader asked for.
-pub fn show(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, note: Option<&str>) -> Ask {
+/// `frame` is the size of the reference, which every still is drawn at.
+pub fn show(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    viewer: &mut FrameViewer,
+    note: Option<&str>,
+    frame: Option<egui::Vec2>,
+) -> Ask {
     let mut ask = Ask::Nothing;
     card(ui, tokens, |ui| {
         ui.set_width(ui.available_width());
@@ -274,7 +281,7 @@ pub fn show(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, note: Option
         }
 
         ui.add_space(8.0);
-        images(ui, tokens, viewer);
+        images(ui, tokens, viewer, frame);
         ui.add_space(8.0);
         ask = controls(ui, tokens, viewer);
 
@@ -332,13 +339,25 @@ fn header(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) {
 }
 
 /// The three images, on a flat neutral gray that is the same in both themes.
-fn images(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) {
+fn images(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, frame: Option<egui::Vec2>) {
     egui::Frame::default()
         .fill(FRAME_VIEWER_GRAY)
         .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let slot_width = ((ui.available_width() - 20.0) / 3.0).max(60.0);
+            let available = ui.available_width();
+            let slot_width = ((available - 20.0) / 3.0).max(60.0);
+            let gap = ui.spacing().item_spacing.x;
+            let one = slot_size(frame, slot_width, viewer.actual_size);
+            let wide = slot_size(frame, slot_width * 2.0, viewer.actual_size);
+            let total = if viewer.wipe {
+                wide.x + gap + one.x
+            } else {
+                one.x * 3.0 + gap * 2.0
+            };
+            // The row sits in the middle of its surround rather than against the left
+            // edge, so a frame that is narrower than its box is not lopsided.
+            let lead = ((available - total) / 2.0).max(0.0);
 
             // At 1:1 a 2160p still is far wider than the window, so the row pans
             // sideways rather than pushing the rest of the page out of shape.
@@ -346,17 +365,18 @@ fn images(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) {
                 .id_salt("frame-viewer-images")
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        ui.add_space(lead);
                         if viewer.slots.is_empty() {
                             for label in ["reference", "encode", "difference"] {
-                                placeholder(ui, label, slot_width, viewer.is_loading());
+                                placeholder(ui, label, one, viewer.is_loading());
                             }
                             return;
                         }
                         if viewer.wipe {
-                            wipe_pane(ui, tokens, viewer, slot_width);
+                            wipe_pane(ui, tokens, viewer, wide, one);
                         } else {
                             for index in 0..viewer.slots.len() {
-                                tile(ui, tokens, viewer, index, slot_width);
+                                tile(ui, tokens, viewer, index, one);
                             }
                         }
                     });
@@ -368,13 +388,12 @@ fn images(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) {
 ///
 /// No tint, no filter and no opacity. The theme never reaches inside these three
 /// frames, so the focus border is the only chrome allowed to sit on top of one.
-fn tile(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, index: usize, slot_width: f32) {
+fn tile(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, index: usize, size: egui::Vec2) {
     let label = viewer.slots[index].label;
     let Some(texture) = viewer.slots[index].texture.as_ref() else {
-        placeholder(ui, label, slot_width, viewer.is_loading());
+        placeholder(ui, label, size, viewer.is_loading());
         return;
     };
-    let size = fit(texture.size_vec2(), slot_width, viewer.actual_size);
     let response = ui.add(
         egui::Image::new(texture)
             .fit_to_exact_size(size)
@@ -432,25 +451,30 @@ fn focus_of(label: &str) -> Option<Focus> {
 ///
 /// Both stills share one pixel size, because the encode chain always scales to the
 /// reference before the difference is drawn, so the line needs no coordinate mapping.
-fn wipe_pane(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, slot_width: f32) {
+fn wipe_pane(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    viewer: &mut FrameViewer,
+    wide: egui::Vec2,
+    one: egui::Vec2,
+) {
     // Owned copies, not borrows, so `viewer` is free to mutate while this reads.
     let reference = viewer
         .slots
         .iter()
         .find(|slot| slot.label == "reference")
         .and_then(|slot| slot.texture.as_ref())
-        .map(|texture| (texture.id(), texture.size_vec2()));
+        .map(|texture| texture.id());
     let encode = viewer
         .slots
         .iter()
         .find(|slot| slot.label == "encode")
         .and_then(|slot| slot.texture.as_ref())
-        .map(|texture| (texture.id(), texture.size_vec2()));
+        .map(|texture| texture.id());
 
     match (reference, encode) {
-        (Some((reference_id, reference_size)), Some((encode_id, _))) => {
-            let size = fit(reference_size, slot_width * 2.0, viewer.actual_size);
-            let (rect, pane) = ui.allocate_exact_size(size, egui::Sense::click());
+        (Some(reference_id), Some(encode_id)) => {
+            let (rect, pane) = ui.allocate_exact_size(wide, egui::Sense::click());
             let painter = ui.painter().clone();
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             painter.image(reference_id, rect, uv, egui::Color32::WHITE);
@@ -502,13 +526,12 @@ fn wipe_pane(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, slot_width:
                 };
             }
         }
-        _ => placeholder(ui, "reference", slot_width * 2.0, false),
+        _ => placeholder(ui, "reference", wide, viewer.is_loading()),
     }
 
-    ui.add_space(10.0);
     // `poll()` always fills all three slots together, so index 2 is the difference
     // whenever `wipe_pane` runs at all (the caller already handled the empty case).
-    tile(ui, tokens, viewer, 2, slot_width);
+    tile(ui, tokens, viewer, 2, one);
 }
 
 fn fit(size: egui::Vec2, slot_width: f32, actual: bool) -> egui::Vec2 {
@@ -519,16 +542,38 @@ fn fit(size: egui::Vec2, slot_width: f32, actual: bool) -> egui::Vec2 {
     size * scale
 }
 
+/// The box one image sits in, taken from the shape of the reference frame.
+///
+/// Every still is the size of the reference, because the encode is scaled to it before
+/// the difference is drawn. Reading the shape from the file rather than from a loaded
+/// texture is what lets the viewer draw the frames in the right shape before it has
+/// any, and it keeps the box the same size once they arrive.
+fn slot_size(frame: Option<egui::Vec2>, slot_width: f32, actual: bool) -> egui::Vec2 {
+    match frame {
+        Some(frame) if frame.x > 0.0 && frame.y > 0.0 => fit(frame, slot_width, actual),
+        _ => egui::vec2(slot_width, SLOT_HEIGHT),
+    }
+}
+
 /// The gray box that stands in for an image, with a spinner while one is being made.
 ///
 /// The spinner turns rather than sits, because a still of a long-GOP file can take a
 /// few seconds and a caption that does not move reads as a hang.
-fn placeholder(ui: &mut Ui, label: &str, width: f32, loading: bool) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, SLOT_HEIGHT), egui::Sense::hover());
+fn placeholder(ui: &mut Ui, label: &str, size: egui::Vec2, loading: bool) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let ink = egui::Color32::from_rgb(0x33, 0x33, 0x33);
     let font = egui::FontId::new(
         11.0,
         egui::FontFamily::Name(crate::fonts::MONO_FAMILY.into()),
+    );
+
+    // The outline stands where the picture will be, so the shape of the frame is on
+    // screen before the frame is, and nothing moves when it arrives.
+    ui.painter().rect_stroke(
+        rect,
+        2.0,
+        egui::Stroke::new(1.0, ink),
+        egui::StrokeKind::Inside,
     );
 
     if !loading {
@@ -537,13 +582,17 @@ fn placeholder(ui: &mut Ui, label: &str, width: f32, loading: bool) {
         return;
     }
 
-    ui.put(
-        egui::Rect::from_center_size(
-            rect.center() - egui::vec2(0.0, SPINNER * 0.5),
-            egui::vec2(SPINNER, SPINNER),
-        ),
-        egui::Spinner::new().size(SPINNER).color(ink),
+    // The spinner is painted, not added as a widget. A widget placed at its own rect
+    // moves the cursor of the row it sits in, which pulled the next box back over this
+    // one and left the three overlapping.
+    spinner(
+        ui.painter(),
+        rect.center() - egui::vec2(0.0, SPINNER * 0.5),
+        SPINNER * 0.5,
+        ink,
+        ui.input(|input| input.time),
     );
+    ui.ctx().request_repaint();
     ui.painter().text(
         rect.center() + egui::vec2(0.0, SPINNER * 0.8),
         egui::Align2::CENTER_CENTER,
@@ -551,6 +600,26 @@ fn placeholder(ui: &mut Ui, label: &str, width: f32, loading: bool) {
         font,
         ink,
     );
+}
+
+/// An arc that turns with the clock, for a frame that is still being made.
+fn spinner(
+    painter: &egui::Painter,
+    center: egui::Pos2,
+    radius: f32,
+    color: egui::Color32,
+    time: f64,
+) {
+    const STEPS: usize = 24;
+    let start = (time * 2.4) as f32;
+    let sweep = std::f32::consts::PI * 1.3;
+    let points: Vec<egui::Pos2> = (0..=STEPS)
+        .map(|step| {
+            let angle = start + sweep * step as f32 / STEPS as f32;
+            center + egui::vec2(angle.cos(), angle.sin()) * radius
+        })
+        .collect();
+    painter.add(egui::Shape::line(points, egui::Stroke::new(2.0, color)));
 }
 
 fn controls(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) -> Ask {
@@ -775,6 +844,40 @@ mod tests {
                 gain: 8,
             })
         );
+    }
+
+    /// The empty viewer and the loaded one read the same function, so the outline a
+    /// reader sees before the frames arrive is the box the frames land in.
+    #[test]
+    fn the_empty_box_keeps_the_shape_of_the_reference_frame() {
+        let wide = slot_size(Some(egui::vec2(1920.0, 1080.0)), 300.0, false);
+        assert!(
+            (wide.x / wide.y - 16.0 / 9.0).abs() < 0.01,
+            "a 16:9 reference gives a 16:9 box, not {wide:?}"
+        );
+
+        let tall = slot_size(Some(egui::vec2(1080.0, 1920.0)), 300.0, false);
+        assert!(tall.y > tall.x, "a portrait reference gives a portrait box");
+        assert!(tall.y <= SLOT_HEIGHT, "the box stays inside the row height");
+    }
+
+    #[test]
+    fn a_reference_of_no_size_falls_back_to_the_plain_box() {
+        assert_eq!(
+            slot_size(None, 300.0, false),
+            egui::vec2(300.0, SLOT_HEIGHT)
+        );
+        assert_eq!(
+            slot_size(Some(egui::vec2(0.0, 0.0)), 300.0, false),
+            egui::vec2(300.0, SLOT_HEIGHT),
+            "a zero size never divides by zero"
+        );
+    }
+
+    #[test]
+    fn one_to_one_draws_the_reference_at_its_own_size() {
+        let frame = egui::vec2(1920.0, 1080.0);
+        assert_eq!(slot_size(Some(frame), 300.0, true), frame);
     }
 
     #[test]
