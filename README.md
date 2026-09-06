@@ -80,13 +80,27 @@ you clicked, and shows the reference, the encode, and the difference between the
 | Control | What it does |
 | --- | --- |
 | `gain` | Multiplies the difference, so a fault too small to see becomes visible |
-| `1:1` | Draws each image at its own pixel size. A fitted image hides the small faults you are looking for |
+| `1:1 ↗` | Opens the frames in their own window, at their own pixel size. A fitted image hides the small faults you are looking for |
 | `wipe` | Puts the reference and the encode in one pane. Drag the line to move the split |
 | `save PNG` | Writes the image you last clicked into the export folder. It starts on the encode |
 | `← worse` and `better →` | Walk the frames in the order the metric puts them, worst first |
 
 The three images sit on a flat gray that is the same in both themes, and no theme color ever
 touches them. A colored surround changes how a person judges an image.
+
+### The window
+
+`1:1 ↗` opens a window of its own. You can move it to a second display and size it freely.
+One image fills the window. Move the pointer to the lower edge to get the other images as
+thumbnails, and click one to put it on the stage.
+
+The zoom control gives **fit**, **50%**, **100% (1:1)**, **200%** and **400%**. An image
+larger than the window pans when you drag it. The footer reads the size of the image and the
+scale it is drawn at.
+
+The window keeps the frame, the gain, the focus and the wipe position of the panel, and hands
+them back when it closes. It closes on its own control and on `Esc`. It is not modal, so you
+can click another point on the graph and the window follows.
 
 ## Build from source
 
