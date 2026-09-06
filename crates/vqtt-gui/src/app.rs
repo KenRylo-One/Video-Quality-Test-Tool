@@ -98,9 +98,14 @@ impl VqttApp {
         // resize on the frame after.
         let mut builder = egui::ViewportBuilder::default().with_title("Frame viewer");
         if !self.popout_built {
+            let monitor = context.input(|i| i.viewport().monitor_size);
+            let (size, position) = popout_geometry(monitor);
             builder = builder
-                .with_inner_size([1280.0, 820.0])
+                .with_inner_size(size)
                 .with_min_inner_size([480.0, 320.0]);
+            if let Some(position) = position {
+                builder = builder.with_position(position);
+            }
             self.popout_built = true;
         }
 
@@ -639,5 +644,73 @@ impl eframe::App for VqttApp {
         if let Some((path, label, frame, gain)) = wants_save {
             self.save_frame_png(path, label, frame, gain);
         }
+    }
+}
+
+/// The opening size and position of the frame viewer window.
+///
+/// The window manager places a new window where it likes, which on a 1080p screen put
+/// the footer of an 820-point window behind the task bar and out of reach. So the tool
+/// asks for a size that leaves room for the task bar and for its own title bar, and
+/// centers the window itself.
+fn popout_geometry(monitor: Option<egui::Vec2>) -> ([f32; 2], Option<[f32; 2]>) {
+    /// What the window asks for on a screen with room for it.
+    const WANTED: egui::Vec2 = egui::vec2(1280.0, 820.0);
+    /// Room left for the task bar, the title bar and a margin.
+    const CHROME: egui::Vec2 = egui::vec2(80.0, 180.0);
+
+    let Some(monitor) = monitor.filter(|size| size.x > 0.0 && size.y > 0.0) else {
+        // The monitor is unknown, so let the window manager place it.
+        return ([WANTED.x, WANTED.y], None);
+    };
+
+    let room = (monitor - CHROME).max(egui::vec2(480.0, 320.0));
+    let size = WANTED.min(room);
+    let position = ((monitor - size) / 2.0).max(egui::Vec2::ZERO);
+    ([size.x, size.y], Some([position.x, position.y]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_opens_at_the_size_it_wants_on_a_screen_with_room() {
+        let (size, position) = popout_geometry(Some(egui::vec2(2560.0, 1440.0)));
+        assert_eq!(size, [1280.0, 820.0]);
+        assert_eq!(position, Some([640.0, 310.0]));
+    }
+
+    /// The case that put the footer behind the task bar: the whole window frame has to
+    /// land inside the screen, with room to spare below it.
+    #[test]
+    fn the_whole_window_lands_on_a_1080p_screen() {
+        let monitor = egui::vec2(1920.0, 1080.0);
+        let (size, position) = popout_geometry(Some(monitor));
+        let position = position.expect("a known monitor is placed by the tool");
+        assert!(
+            position[1] + size[1] <= monitor.y - 80.0,
+            "the bottom edge at {} leaves no room for a task bar",
+            position[1] + size[1]
+        );
+        assert!(position[0] >= 0.0 && position[1] >= 0.0);
+    }
+
+    #[test]
+    fn a_small_screen_shrinks_the_window_rather_than_pushing_it_off() {
+        let monitor = egui::vec2(1366.0, 768.0);
+        let (size, position) = popout_geometry(Some(monitor));
+        let position = position.expect("a known monitor is placed by the tool");
+        assert_eq!(size, [1280.0, 588.0]);
+        assert!(position[1] + size[1] <= monitor.y - 80.0);
+    }
+
+    #[test]
+    fn an_unknown_monitor_leaves_the_placing_to_the_window_manager() {
+        assert_eq!(popout_geometry(None), ([1280.0, 820.0], None));
+        assert_eq!(
+            popout_geometry(Some(egui::Vec2::ZERO)),
+            ([1280.0, 820.0], None)
+        );
     }
 }
