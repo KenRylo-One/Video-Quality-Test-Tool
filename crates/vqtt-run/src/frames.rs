@@ -103,6 +103,35 @@ fn quote(text: &str) -> String {
     }
 }
 
+/// The folder that holds the working files of every run.
+///
+/// The setting wins when it holds a path. Without one this is the cache folder of the
+/// system, because everything under it can be built again from the source files.
+pub fn scratch_root(setting: Option<&Path>) -> PathBuf {
+    if let Some(folder) = setting {
+        return folder.to_path_buf();
+    }
+    crate::dirs::folder(crate::dirs::Kind::Cache)
+        .map(|cache| cache.join("runs"))
+        .unwrap_or_else(|| std::env::temp_dir().join("vqtt-run"))
+}
+
+/// Empties the scratch folder.
+///
+/// Nothing under it survives a run, and it grows by a still for every frame that was
+/// looked at, so it is cleared rather than kept. A folder that will not go leaves the
+/// run to write beside it, which costs disk and never correctness.
+pub fn clear_scratch(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// Names a PNG the frame viewer saves to the export folder.
 ///
 /// The two stills carry no gain in their own names, so only the difference names one.
@@ -223,6 +252,39 @@ mod tests {
             "\"C:/Program Files/a.exe\""
         );
         assert_eq!(quote("ffmpeg"), "ffmpeg");
+    }
+
+    #[test]
+    fn the_setting_wins_over_the_cache_folder_for_the_scratch() {
+        let chosen = PathBuf::from("/srv/scratch");
+        assert_eq!(scratch_root(Some(&chosen)), chosen);
+        assert_ne!(
+            scratch_root(None),
+            chosen,
+            "no setting falls back to the folder of the system"
+        );
+    }
+
+    /// The stills of the run before are read back by name, so a run that inherited
+    /// them would show the wrong pictures. Clearing is what stops that.
+    #[test]
+    fn clearing_the_scratch_takes_every_run_folder_with_it() {
+        let root = std::env::temp_dir().join("vqtt-clear-scratch-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("run-one")).unwrap();
+        std::fs::create_dir_all(root.join("run-two")).unwrap();
+        std::fs::write(root.join("run-one").join("f1_ref.png"), b"old").unwrap();
+
+        clear_scratch(&root);
+
+        assert!(root.exists(), "the root itself stays");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn clearing_a_scratch_that_is_not_there_does_nothing_and_never_panics() {
+        clear_scratch(&std::env::temp_dir().join("vqtt-scratch-that-is-not-there"));
     }
 
     #[test]

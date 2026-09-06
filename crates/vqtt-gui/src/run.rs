@@ -72,9 +72,11 @@ impl RunState {
         let now = std::time::SystemTime::now();
         let run_id = vqtt_run::record::run_id(now);
         let started = vqtt_run::record::timestamp(now);
-        let work_dir = std::env::temp_dir()
-            .join("vqtt-run")
-            .join(vqtt_run::record::safe_name(&run_id));
+        let scratch = vqtt_run::scratch_root(session.settings.temp_folder.as_deref());
+        // Last run's stills are read back by name, so a run that inherited them would
+        // show the pictures of the run before it. Clearing first is what stops that.
+        vqtt_run::clear_scratch(&scratch);
+        let work_dir = scratch.join(vqtt_run::record::safe_name(&run_id));
 
         let vmaf_model_folder =
             vqtt_run::vmaf_models::find_model_folder(session.settings.vmaf_model_folder.as_deref());
