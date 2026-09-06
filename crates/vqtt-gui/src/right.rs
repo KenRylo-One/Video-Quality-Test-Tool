@@ -482,23 +482,55 @@ fn hover_readout(
     });
 }
 
-/// The width of the color swatch column.
-const SWATCH_COL: f32 = 16.0;
+/// The nine column weights of the results grid, as the design's `fr` units.
+const COLUMN_WEIGHTS: [f32; 9] = [1.6, 1.0, 0.8, 0.8, 0.9, 0.9, 0.8, 0.8, 0.8];
 
-/// The width of the `Video` column. Wide enough that a real file name does not wrap.
-const NAME_COL: f32 = 130.0;
+/// The gap between two columns.
+const COLUMN_GAP: f32 = 14.0;
 
-/// The width of the `metric` column. Wide enough for "Butteraugli 3-norm".
-const METRIC_COL: f32 = 118.0;
+/// The padding inside the left and the right edge of the table.
+const TABLE_PAD: f32 = 14.0;
 
-/// The width of one numeric column.
-const NUM_COL: f32 = 72.0;
+/// The table never draws narrower than this. Below it, the card scrolls sideways.
+const TABLE_MIN_WIDTH: f32 = 640.0;
 
-/// The row height, for the striping and the header rule.
-const ROW_HEIGHT: f32 = 18.0;
+/// The height of one data row.
+const ROW_HEIGHT: f32 = 28.0;
 
-/// The height of the scrolling body, below the fixed header.
-const BODY_HEIGHT: f32 = 224.0;
+/// The height of the header row.
+const HEADER_HEIGHT: f32 = 30.0;
+
+/// The height of the scrolling body, below the header that stays.
+const BODY_HEIGHT: f32 = 216.0;
+
+/// The side of the color swatch.
+const SWATCH: f32 = 9.0;
+
+/// The gap between the swatch and the file name.
+const SWATCH_GAP: f32 = 8.0;
+
+/// The nine column headers, in grid order.
+const HEADERS: [&str; 9] = [
+    "VIDEO", "METRIC", "MEAN", "MEDIAN", "WORST 5%", "WORST 1%", "MIN", "MAX", "STD DEV",
+];
+
+/// The left edge and the width of every column, for a table this wide.
+///
+/// The design lays the table out as a grid of fixed proportions, so the columns share
+/// the width in that proportion rather than each taking what its own text needs. The
+/// proportion is the only thing that holds a header over its own numbers.
+fn columns(width: f32) -> [(f32, f32); 9] {
+    let weight: f32 = COLUMN_WEIGHTS.iter().sum();
+    let free = (width - 2.0 * TABLE_PAD - COLUMN_GAP * 8.0).max(1.0);
+    let mut out = [(0.0, 0.0); 9];
+    let mut left = TABLE_PAD;
+    for (column, share) in COLUMN_WEIGHTS.iter().enumerate() {
+        let cell = free * share / weight;
+        out[column] = (left, cell);
+        left += cell + COLUMN_GAP;
+    }
+    out
+}
 
 fn numbers_table(
     ui: &mut Ui,
@@ -506,32 +538,25 @@ fn numbers_table(
     session: &Session,
     results: &HashMap<(FileId, MetricId), Pooled>,
 ) {
+    let width = ui.available_width().max(TABLE_MIN_WIDTH);
+
     egui::Frame::default()
         .fill(tokens.sunken)
         .stroke(egui::Stroke::new(1.0, tokens.border))
         .corner_radius(crate::theme::RADIUS)
-        .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
-            ui.set_width(ui.available_width());
             // An outer horizontal scroll carries the header and the body together, so
-            // panning sideways never lets the header drift out from over its columns.
-            // Only the inner vertical scroll moves when the reader scrolls down, which
-            // is what keeps the header in view.
+            // panning sideways never lets the header drift off its own columns. Only
+            // the inner vertical scroll moves under a scroll down, which is what keeps
+            // the header in view.
             egui::ScrollArea::horizontal()
                 .id_salt("results-table")
                 .show(ui, |ui| {
-                    header_row(ui, tokens);
-                    ui.painter().hline(
-                        ui.min_rect().x_range(),
-                        ui.cursor().min.y,
-                        egui::Stroke::new(1.0, tokens.border),
-                    );
-                    ui.add_space(3.0);
+                    header_row(ui, tokens, width);
                     egui::ScrollArea::vertical()
                         .id_salt("results-rows")
                         .max_height(BODY_HEIGHT)
                         .show(ui, |ui| {
-                            let mut striped = false;
                             for encode in session.files.encodes() {
                                 let slot = session.files.slot_of(encode.id);
                                 for metric in vqtt_core::metric::REGISTRY.iter().map(|def| def.id) {
@@ -545,9 +570,8 @@ fn numbers_table(
                                         &encode.label,
                                         metric,
                                         pooled,
-                                        striped,
+                                        width,
                                     );
-                                    striped = !striped;
                                 }
                             }
                         });
@@ -555,20 +579,23 @@ fn numbers_table(
         });
 }
 
-fn header_row(ui: &mut Ui, tokens: &Tokens) {
-    ui.horizontal(|ui| {
-        ui.add_space(SWATCH_COL);
-        text_cell(ui, tokens.text_muted, 10.5, NAME_COL, "Video", false);
-        text_cell(ui, tokens.text_muted, 10.5, METRIC_COL, "metric", false);
-        for label in [
-            "mean", "median", "Worst 5%", "Worst 1%", "min", "max", "std dev",
-        ] {
-            text_cell(ui, tokens.text_muted, 10.5, NUM_COL, label, true);
-        }
-    });
+fn header_row(ui: &mut Ui, tokens: &Tokens, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, HEADER_HEIGHT), egui::Sense::hover());
+    let painter = ui.painter().clone();
+    for ((left, cell), label) in columns(width).into_iter().zip(HEADERS) {
+        let at = egui::Rect::from_min_size(
+            egui::pos2(rect.left() + left, rect.top()),
+            egui::vec2(cell, rect.height()),
+        );
+        cell_text(&painter, at, label, 10.5, tokens.text_muted);
+    }
+    painter.hline(
+        rect.x_range(),
+        rect.bottom(),
+        egui::Stroke::new(1.0, tokens.border),
+    );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn data_row(
     ui: &mut Ui,
     tokens: &Tokens,
@@ -576,7 +603,7 @@ fn data_row(
     encode_label: &str,
     metric: MetricId,
     pooled: &Pooled,
-    striped: bool,
+    width: f32,
 ) {
     let def = metric.def();
     let suffix = def.unit.suffix();
@@ -590,93 +617,83 @@ fn data_row(
         vqtt_core::metric::Percentile::P95 => pooled.p99,
     };
 
-    if striped {
-        let top = ui.cursor().min;
-        let rect = egui::Rect::from_min_size(top, egui::vec2(ui.available_width(), ROW_HEIGHT));
-        ui.painter().rect_filled(rect, 0.0, tokens.panel);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), egui::Sense::hover());
+    let painter = ui.painter().clone();
+    let grid = columns(width);
+    let at = |column: usize| {
+        let (left, cell) = grid[column];
+        egui::Rect::from_min_size(
+            egui::pos2(rect.left() + left, rect.top()),
+            egui::vec2(cell, rect.height()),
+        )
+    };
+
+    // The swatch carries the colour of this encode's line on the plot, so a row reads
+    // back to a line without counting either of them.
+    let color = series_color(tokens.theme, slot.unwrap_or(0))
+        .map(|series| egui::Color32::from_rgb(series.r, series.g, series.b))
+        .unwrap_or(tokens.text_muted);
+    let video = at(0);
+    let swatch = egui::Rect::from_min_size(
+        egui::pos2(video.left(), video.center().y - SWATCH / 2.0),
+        egui::vec2(SWATCH, SWATCH),
+    );
+    painter.rect_filled(swatch, 2.0, color);
+    let name = egui::Rect::from_min_max(
+        egui::pos2(video.left() + SWATCH + SWATCH_GAP, video.top()),
+        video.max,
+    );
+    cell_text(&painter, name, encode_label, 11.5, tokens.text);
+
+    let primary = tokens.text;
+    let secondary = tokens.text_secondary;
+    let numbers = [
+        (1, def.label.to_string(), secondary),
+        (2, format!("{:.2}{suffix}", pooled.mean), primary),
+        (3, format!("{:.2}{suffix}", pooled.median), primary),
+        (4, format!("{worst_5:.2}{suffix}"), primary),
+        (5, format!("{worst_1:.2}{suffix}"), primary),
+        (6, format!("{:.2}{suffix}", pooled.min), secondary),
+        (7, format!("{:.2}{suffix}", pooled.max), secondary),
+        (8, format!("{:.2}{suffix}", pooled.stdev), secondary),
+    ];
+    for (column, text, color) in numbers {
+        cell_text(&painter, at(column), &text, 11.5, color);
     }
 
-    ui.horizontal(|ui| {
-        let color = series_color(tokens.theme, slot.unwrap_or(0))
-            .map(|series| egui::Color32::from_rgb(series.r, series.g, series.b))
-            .unwrap_or(tokens.text_muted);
-        ui.allocate_ui_with_layout(
-            egui::vec2(SWATCH_COL, ROW_HEIGHT),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| color_swatch(ui, 10.0, color, true),
-        );
-
-        text_cell(ui, tokens.text, 11.0, NAME_COL, encode_label, false);
-        text_cell(ui, tokens.text, 11.0, METRIC_COL, def.label, false);
-        text_cell(
-            ui,
-            tokens.text,
-            11.0,
-            NUM_COL,
-            &format!("{:.2}{suffix}", pooled.mean),
-            true,
-        );
-        text_cell(
-            ui,
-            tokens.text,
-            11.0,
-            NUM_COL,
-            &format!("{:.2}{suffix}", pooled.median),
-            true,
-        );
-        text_cell(
-            ui,
-            tokens.text,
-            11.0,
-            NUM_COL,
-            &format!("{worst_5:.2}{suffix}"),
-            true,
-        );
-        text_cell(
-            ui,
-            tokens.text,
-            11.0,
-            NUM_COL,
-            &format!("{worst_1:.2}{suffix}"),
-            true,
-        );
-        text_cell(
-            ui,
-            tokens.text,
-            11.0,
-            NUM_COL,
-            &format!("{:.2}{suffix}", pooled.min),
-            true,
-        );
-        text_cell(
-            ui,
-            tokens.text,
-            11.0,
-            NUM_COL,
-            &format!("{:.2}{suffix}", pooled.max),
-            true,
-        );
-        text_cell(
-            ui,
-            tokens.text,
-            11.0,
-            NUM_COL,
-            &format!("{:.2}{suffix}", pooled.stdev),
-            true,
-        );
-    });
+    painter.hline(
+        rect.x_range(),
+        rect.bottom(),
+        egui::Stroke::new(1.0, tokens.border),
+    );
 }
 
-/// One table cell. Numeric columns sit right-aligned, so the decimal points line up.
-fn text_cell(ui: &mut Ui, color: egui::Color32, size: f32, width: f32, text: &str, right: bool) {
-    let align = if right {
-        egui::Layout::right_to_left(egui::Align::Center)
-    } else {
-        egui::Layout::left_to_right(egui::Align::Center)
-    };
-    ui.allocate_ui_with_layout(egui::vec2(width, ROW_HEIGHT), align, |ui| {
-        ui.label(mono(text, size, color));
-    });
+/// One cell of the grid, cut short with an ellipsis rather than pushing its neighbour.
+///
+/// A cell that grows to fit its own text moves every column after it, and a long file
+/// name is normal. The text is laid out to the width of its column and no wider.
+fn cell_text(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    text: &str,
+    size: f32,
+    color: egui::Color32,
+) {
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat {
+            font_id: egui::FontId::new(
+                size,
+                egui::FontFamily::Name(crate::fonts::MONO_FAMILY.into()),
+            ),
+            color,
+            ..Default::default()
+        },
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width());
+    let galley = painter.layout_job(job);
+    let at = egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0);
+    painter.galley(at, galley, color);
 }
 
 #[cfg(test)]
@@ -748,5 +765,44 @@ mod tests {
 
         state.toggle_line(FileId(2));
         assert!(state.hidden.is_empty());
+    }
+
+    /// The header and the rows read the same grid, so a column that moved for one of
+    /// them moved for both. What must hold is that the grid fills the table exactly.
+    #[test]
+    fn the_results_grid_fills_the_table_and_never_overlaps() {
+        for width in [TABLE_MIN_WIDTH, 900.0, 1440.0] {
+            let grid = columns(width);
+            assert_eq!(
+                grid[0].0, TABLE_PAD,
+                "the first column starts at the padding"
+            );
+
+            for pair in grid.windows(2) {
+                let (left, cell) = pair[0];
+                let (next, _) = pair[1];
+                assert!(cell > 0.0, "a column at {width} has no width");
+                assert!(
+                    (next - (left + cell) - COLUMN_GAP).abs() < 0.01,
+                    "the gap between two columns at {width} is not the design gap"
+                );
+            }
+
+            let (left, cell) = grid[8];
+            assert!(
+                (width - (left + cell) - TABLE_PAD).abs() < 0.01,
+                "the last column at {width} does not end at the padding"
+            );
+        }
+    }
+
+    /// The `Video` column is the widest because a file name is the longest text in the
+    /// table. It is cut with an ellipsis rather than allowed to push its neighbours.
+    #[test]
+    fn the_video_column_is_the_widest_one() {
+        let grid = columns(900.0);
+        let widest = grid.iter().map(|(_, cell)| *cell).fold(f32::MIN, f32::max);
+
+        assert_eq!(grid[0].1, widest);
     }
 }
