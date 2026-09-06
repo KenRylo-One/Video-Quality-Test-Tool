@@ -30,6 +30,9 @@ const WIPE_GRAB: f32 = 14.0;
 /// The width of the grip drawn on the wipe line.
 const WIPE_GRIP: f32 = 4.0;
 
+/// The size of the spinner that stands in for an image still being made.
+const SPINNER: f32 = 22.0;
+
 /// What came back from the worker thread.
 type Extraction = vqtt_core::Result<vqtt_run::ExtractedFrame>;
 
@@ -209,6 +212,20 @@ impl FrameViewer {
         self.pending.is_some()
     }
 
+    /// Drops the difference image and keeps the two stills.
+    ///
+    /// Only the difference carries the gain, so a new gain redraws that one alone. The
+    /// two stills are already on disk and stay on screen while it is made.
+    fn drop_difference(&mut self) {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|slot| slot.label == "difference")
+        {
+            slot.texture = None;
+        }
+    }
+
     /// Records what a save action did, so it shows next to the controls.
     pub fn report_save(&mut self, result: Result<PathBuf, String>) {
         self.save_status = Some(match result {
@@ -354,7 +371,7 @@ fn images(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) {
 fn tile(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, index: usize, slot_width: f32) {
     let label = viewer.slots[index].label;
     let Some(texture) = viewer.slots[index].texture.as_ref() else {
-        placeholder(ui, label, slot_width, false);
+        placeholder(ui, label, slot_width, viewer.is_loading());
         return;
     };
     let size = fit(texture.size_vec2(), slot_width, viewer.actual_size);
@@ -502,18 +519,37 @@ fn fit(size: egui::Vec2, slot_width: f32, actual: bool) -> egui::Vec2 {
     size * scale
 }
 
+/// The gray box that stands in for an image, with a spinner while one is being made.
+///
+/// The spinner turns rather than sits, because a still of a long-GOP file can take a
+/// few seconds and a caption that does not move reads as a hang.
 fn placeholder(ui: &mut Ui, label: &str, width: f32, loading: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, SLOT_HEIGHT), egui::Sense::hover());
-    let text = if loading { "reading…" } else { label };
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        text,
-        egui::FontId::new(
-            11.0,
-            egui::FontFamily::Name(crate::fonts::MONO_FAMILY.into()),
+    let ink = egui::Color32::from_rgb(0x33, 0x33, 0x33);
+    let font = egui::FontId::new(
+        11.0,
+        egui::FontFamily::Name(crate::fonts::MONO_FAMILY.into()),
+    );
+
+    if !loading {
+        ui.painter()
+            .text(rect.center(), egui::Align2::CENTER_CENTER, label, font, ink);
+        return;
+    }
+
+    ui.put(
+        egui::Rect::from_center_size(
+            rect.center() - egui::vec2(0.0, SPINNER * 0.5),
+            egui::vec2(SPINNER, SPINNER),
         ),
-        egui::Color32::from_rgb(0x33, 0x33, 0x33),
+        egui::Spinner::new().size(SPINNER).color(ink),
+    );
+    ui.painter().text(
+        rect.center() + egui::vec2(0.0, SPINNER * 0.8),
+        egui::Align2::CENTER_CENTER,
+        label,
+        font,
+        ink,
     );
 }
 
@@ -584,9 +620,11 @@ the split.",
     if before != (viewer.frame, viewer.gain)
         && let Some(frame) = viewer.frame
     {
-        // A new gain redraws only the difference, because the two stills carry no gain
-        // in their names and are already on disk.
-        viewer.slots.clear();
+        if before.0 == viewer.frame {
+            viewer.drop_difference();
+        } else {
+            viewer.slots.clear();
+        }
         ask = Ask::Extract(frame, viewer.gain);
     } else if save_clicked && let Some(save) = save_ask(viewer) {
         ask = save;
