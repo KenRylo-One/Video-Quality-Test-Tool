@@ -32,18 +32,33 @@ list with a link for each program. Press **find** on a row after you install it.
 ## Install
 
 Unpack the archive for your system and run `vqtt`. There is no installer, and it needs no
-administrator rights. The tool writes your settings to the configuration folder of your
-operating system and to nowhere else.
+administrator rights.
 
-| System | Settings |
-| --- | --- |
-| Windows | `%APPDATA%\vqtt` |
-| macOS | `~/Library/Application Support/vqtt` |
-| Linux | `$XDG_CONFIG_HOME/vqtt`, or `~/.config/vqtt` |
+The tool writes to the folders that your operating system keeps for these things, and never
+beside the program. The program can sit in a folder that you cannot write to.
+
+| System | Settings | Cache and working files | Exports |
+| --- | --- | --- | --- |
+| Windows | `%APPDATA%\vqtt` | `%LOCALAPPDATA%\vqtt\cache` | `%USERPROFILE%\Documents\vqtt` |
+| macOS | `~/Library/Application Support/vqtt` | `~/Library/Caches/vqtt` | `~/Documents/vqtt` |
+| Linux | `$XDG_CONFIG_HOME/vqtt`, or `~/.config/vqtt` | `$XDG_CACHE_HOME/vqtt`, or `~/.cache/vqtt` | `~/Documents/vqtt` |
+
+The cache holds what the tool can build again: the answer of the last back-end scan, and the
+working files of a run under `runs`. The working files are the metric logs and every still
+that the frame viewer made. The tool clears them when the next run starts.
+
+Settings can name a different folder for the working files and for the exports.
 
 ### Exporting
 
-The tool writes one folder for each run, named `vqtt-<run id>`.
+Press **export** above the graph. The tool writes one folder for each run into the export
+folder. It never stops to ask where to put it.
+
+The folder carries the local date and time that the run started, as
+`vqtt-2026-09-06T19-40-46.749+0800`. The offset at the end names the clock that read the
+time, which keeps two runs apart when a local hour repeats. A system that does not give its
+offset writes `Z` and the time in UTC. Inside `run.json` every moment is UTC, because a
+moment that is kept must never be ambiguous.
 
 | File | Holds |
 | --- | --- |
@@ -55,6 +70,23 @@ The tool writes one folder for each run, named `vqtt-<run id>`.
 
 `frames-<encode>.csv` opens in a spreadsheet. It is the file to keep if you want to pool the
 values a different way later.
+
+## The frame viewer
+
+Every metric has known faults, so a measurement ends with a person looking at the pixels.
+Click a point on the graph. The viewer opens under the graph on the worst frame of the line
+you clicked, and shows the reference, the encode, and the difference between them.
+
+| Control | What it does |
+| --- | --- |
+| `gain` | Multiplies the difference, so a fault too small to see becomes visible |
+| `1:1` | Draws each image at its own pixel size. A fitted image hides the small faults you are looking for |
+| `wipe` | Puts the reference and the encode in one pane. Drag the line to move the split |
+| `save PNG` | Writes the image you last clicked into the export folder. It starts on the encode |
+| `← worse` and `better →` | Walk the frames in the order the metric puts them, worst first |
+
+The three images sit on a flat gray that is the same in both themes, and no theme color ever
+touches them. A colored surround changes how a person judges an image.
 
 ## Build from source
 
