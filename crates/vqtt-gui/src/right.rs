@@ -2,7 +2,7 @@
 
 use crate::plot as renderer;
 use crate::theme::Tokens;
-use crate::widgets::{card, empty_state, mono, sans, section_header};
+use crate::widgets::{card, color_swatch, empty_state, mono, sans, section_header};
 use egui::Ui;
 use std::collections::{BTreeSet, HashMap};
 use vqtt_core::media::Rational;
@@ -424,14 +424,13 @@ fn legend(
             let color = series_color(tokens.theme, slot.unwrap_or(0))
                 .map(|series| egui::Color32::from_rgb(series.r, series.g, series.b))
                 .unwrap_or(tokens.text_muted);
-            let swatch = if shown { "\u{25a0}" } else { "\u{25a1}" };
             let text = if shown {
                 tokens.text
             } else {
                 tokens.text_muted
             };
             let entry = ui.horizontal(|ui| {
-                ui.label(mono(swatch, 11.0, color));
+                color_swatch(ui, 10.0, color, shown);
                 ui.label(sans(label, 11.0, text));
             });
             if entry
@@ -483,6 +482,24 @@ fn hover_readout(
     });
 }
 
+/// The width of the color swatch column.
+const SWATCH_COL: f32 = 16.0;
+
+/// The width of the `Video` column. Wide enough that a real file name does not wrap.
+const NAME_COL: f32 = 130.0;
+
+/// The width of the `metric` column. Wide enough for "Butteraugli 3-norm".
+const METRIC_COL: f32 = 118.0;
+
+/// The width of one numeric column.
+const NUM_COL: f32 = 72.0;
+
+/// The row height, for the striping and the header rule.
+const ROW_HEIGHT: f32 = 18.0;
+
+/// The height of the scrolling body, below the fixed header.
+const BODY_HEIGHT: f32 = 224.0;
+
 fn numbers_table(
     ui: &mut Ui,
     tokens: &Tokens,
@@ -496,35 +513,73 @@ fn numbers_table(
         .inner_margin(egui::Margin::same(10))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            egui::ScrollArea::both().max_height(246.0).show(ui, |ui| {
-                header_row(ui, tokens);
-                for encode in session.files.encodes() {
-                    for metric in vqtt_core::metric::REGISTRY.iter().map(|def| def.id) {
-                        let Some(pooled) = results.get(&(encode.id, metric)) else {
-                            continue;
-                        };
-                        data_row(ui, tokens, &encode.label, metric, pooled);
-                    }
-                }
-            });
+            // An outer horizontal scroll carries the header and the body together, so
+            // panning sideways never lets the header drift out from over its columns.
+            // Only the inner vertical scroll moves when the reader scrolls down, which
+            // is what keeps the header in view.
+            egui::ScrollArea::horizontal()
+                .id_salt("results-table")
+                .show(ui, |ui| {
+                    header_row(ui, tokens);
+                    ui.painter().hline(
+                        ui.min_rect().x_range(),
+                        ui.cursor().min.y,
+                        egui::Stroke::new(1.0, tokens.border),
+                    );
+                    ui.add_space(3.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("results-rows")
+                        .max_height(BODY_HEIGHT)
+                        .show(ui, |ui| {
+                            let mut striped = false;
+                            for encode in session.files.encodes() {
+                                let slot = session.files.slot_of(encode.id);
+                                for metric in vqtt_core::metric::REGISTRY.iter().map(|def| def.id) {
+                                    let Some(pooled) = results.get(&(encode.id, metric)) else {
+                                        continue;
+                                    };
+                                    data_row(
+                                        ui,
+                                        tokens,
+                                        slot,
+                                        &encode.label,
+                                        metric,
+                                        pooled,
+                                        striped,
+                                    );
+                                    striped = !striped;
+                                }
+                            }
+                        });
+                });
         });
 }
 
 fn header_row(ui: &mut Ui, tokens: &Tokens) {
     ui.horizontal(|ui| {
+        ui.add_space(SWATCH_COL);
+        text_cell(ui, tokens.text_muted, 10.5, NAME_COL, "Video", false);
+        text_cell(ui, tokens.text_muted, 10.5, METRIC_COL, "metric", false);
         for label in [
-            "Video", "metric", "mean", "median", "Worst 5%", "Worst 1%", "min", "max", "std dev",
+            "mean", "median", "Worst 5%", "Worst 1%", "min", "max", "std dev",
         ] {
-            ui.add_sized(
-                [80.0, 16.0],
-                egui::Label::new(mono(label, 10.5, tokens.text_muted)),
-            );
+            text_cell(ui, tokens.text_muted, 10.5, NUM_COL, label, true);
         }
     });
 }
 
-fn data_row(ui: &mut Ui, tokens: &Tokens, encode_label: &str, metric: MetricId, pooled: &Pooled) {
+#[allow(clippy::too_many_arguments)]
+fn data_row(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    slot: Option<usize>,
+    encode_label: &str,
+    metric: MetricId,
+    pooled: &Pooled,
+    striped: bool,
+) {
     let def = metric.def();
+    let suffix = def.unit.suffix();
     let bad_end = def.direction.bad_end();
     let worst_5 = match bad_end {
         vqtt_core::metric::Percentile::P5 => pooled.p5,
@@ -535,22 +590,92 @@ fn data_row(ui: &mut Ui, tokens: &Tokens, encode_label: &str, metric: MetricId, 
         vqtt_core::metric::Percentile::P95 => pooled.p99,
     };
 
+    if striped {
+        let top = ui.cursor().min;
+        let rect = egui::Rect::from_min_size(top, egui::vec2(ui.available_width(), ROW_HEIGHT));
+        ui.painter().rect_filled(rect, 0.0, tokens.panel);
+    }
+
     ui.horizontal(|ui| {
-        let cell = |ui: &mut Ui, text: String| {
-            ui.add_sized(
-                [80.0, 16.0],
-                egui::Label::new(mono(text, 11.0, tokens.text)),
-            );
-        };
-        cell(ui, encode_label.to_string());
-        cell(ui, def.label.to_string());
-        cell(ui, format!("{:.2}", pooled.mean));
-        cell(ui, format!("{:.2}", pooled.median));
-        cell(ui, format!("{worst_5:.2}"));
-        cell(ui, format!("{worst_1:.2}"));
-        cell(ui, format!("{:.2}", pooled.min));
-        cell(ui, format!("{:.2}", pooled.max));
-        cell(ui, format!("{:.2}", pooled.stdev));
+        let color = series_color(tokens.theme, slot.unwrap_or(0))
+            .map(|series| egui::Color32::from_rgb(series.r, series.g, series.b))
+            .unwrap_or(tokens.text_muted);
+        ui.allocate_ui_with_layout(
+            egui::vec2(SWATCH_COL, ROW_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| color_swatch(ui, 10.0, color, true),
+        );
+
+        text_cell(ui, tokens.text, 11.0, NAME_COL, encode_label, false);
+        text_cell(ui, tokens.text, 11.0, METRIC_COL, def.label, false);
+        text_cell(
+            ui,
+            tokens.text,
+            11.0,
+            NUM_COL,
+            &format!("{:.2}{suffix}", pooled.mean),
+            true,
+        );
+        text_cell(
+            ui,
+            tokens.text,
+            11.0,
+            NUM_COL,
+            &format!("{:.2}{suffix}", pooled.median),
+            true,
+        );
+        text_cell(
+            ui,
+            tokens.text,
+            11.0,
+            NUM_COL,
+            &format!("{worst_5:.2}{suffix}"),
+            true,
+        );
+        text_cell(
+            ui,
+            tokens.text,
+            11.0,
+            NUM_COL,
+            &format!("{worst_1:.2}{suffix}"),
+            true,
+        );
+        text_cell(
+            ui,
+            tokens.text,
+            11.0,
+            NUM_COL,
+            &format!("{:.2}{suffix}", pooled.min),
+            true,
+        );
+        text_cell(
+            ui,
+            tokens.text,
+            11.0,
+            NUM_COL,
+            &format!("{:.2}{suffix}", pooled.max),
+            true,
+        );
+        text_cell(
+            ui,
+            tokens.text,
+            11.0,
+            NUM_COL,
+            &format!("{:.2}{suffix}", pooled.stdev),
+            true,
+        );
+    });
+}
+
+/// One table cell. Numeric columns sit right-aligned, so the decimal points line up.
+fn text_cell(ui: &mut Ui, color: egui::Color32, size: f32, width: f32, text: &str, right: bool) {
+    let align = if right {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    };
+    ui.allocate_ui_with_layout(egui::vec2(width, ROW_HEIGHT), align, |ui| {
+        ui.label(mono(text, size, color));
     });
 }
 

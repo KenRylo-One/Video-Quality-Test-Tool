@@ -200,11 +200,13 @@ did not reach this score. The images below are corrected and the number is not."
                     ui.label(mono(APP_NAME, 11.5, self.tokens.text));
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let gear = ui.add(
-                            egui::Button::new(mono("⚙", 13.0, self.tokens.text))
-                                .fill(self.tokens.window)
-                                .stroke(egui::Stroke::new(1.0, self.tokens.border)),
-                        );
+                        let gear = egui::Frame::default()
+                            .fill(self.tokens.window)
+                            .stroke(egui::Stroke::new(1.0, self.tokens.border))
+                            .corner_radius(crate::theme::RADIUS)
+                            .inner_margin(egui::Margin::same(4))
+                            .show(ui, |ui| widgets::gear_icon(ui, 16.0, self.tokens.text))
+                            .inner;
                         if gear.on_hover_text("Settings").clicked() {
                             self.settings_ui.open = !self.settings_ui.open;
                             self.settings_ui.sync(&self.session);

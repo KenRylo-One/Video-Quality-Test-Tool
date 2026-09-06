@@ -79,3 +79,49 @@ pub fn diff_mark(ui: &mut Ui, tokens: &Tokens, message: &str) {
 pub fn note_line(ui: &mut Ui, tokens: &Tokens, text: &str) {
     ui.label(sans(text, 11.0, tokens.text_muted).italics());
 }
+
+/// A small cog, drawn with the painter rather than a font glyph.
+///
+/// No text font ships every symbol, and a missing glyph draws as a tofu box with no
+/// warning. The tool draws the icons it depends on for the same reason it draws its own
+/// plot and its own range slider: a shape it paints itself cannot go missing.
+pub fn gear_icon(ui: &mut Ui, size: f32, color: Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let painter = ui.painter();
+    let center = rect.center();
+    let outer = size * 0.36;
+    let inner = size * 0.16;
+    let stroke = Stroke::new((size * 0.09).max(1.0), color);
+
+    for tooth in 0..8 {
+        let angle = std::f32::consts::TAU * tooth as f32 / 8.0;
+        let direction = egui::vec2(angle.cos(), angle.sin());
+        painter.line_segment(
+            [
+                center + direction * outer * 0.7,
+                center + direction * outer * 1.15,
+            ],
+            stroke,
+        );
+    }
+    painter.circle_stroke(center, outer, stroke);
+    painter.circle_filled(center, inner, color);
+
+    response
+}
+
+/// A small colored square standing in for a series line.
+///
+/// This used to be the glyph "■" (or "□" hollow), but that glyph is one more symbol
+/// IBM Plex Mono does not carry, so it drew as the same tofu box as the gear. Painted
+/// like this it cannot go missing.
+pub fn color_swatch(ui: &mut Ui, size: f32, color: Color32, filled: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    if filled {
+        ui.painter().rect_filled(rect, 1.0, color);
+    } else {
+        ui.painter()
+            .rect_stroke(rect, 1.0, Stroke::new(1.0, color), egui::StrokeKind::Inside);
+    }
+    response
+}
