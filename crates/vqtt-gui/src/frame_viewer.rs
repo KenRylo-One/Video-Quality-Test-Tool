@@ -24,6 +24,12 @@ const GAINS: [u32; 5] = [1, 2, 4, 8, 16];
 /// The height of one image slot.
 const SLOT_HEIGHT: f32 = 150.0;
 
+/// How wide a band around the wipe line takes a drag.
+const WIPE_GRAB: f32 = 14.0;
+
+/// The width of the grip drawn on the wipe line.
+const WIPE_GRIP: f32 = 4.0;
+
 /// What came back from the worker thread.
 type Extraction = vqtt_core::Result<vqtt_run::ExtractedFrame>;
 
@@ -317,21 +323,27 @@ fn images(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) {
             ui.set_width(ui.available_width());
             let slot_width = ((ui.available_width() - 20.0) / 3.0).max(60.0);
 
-            ui.horizontal(|ui| {
-                if viewer.slots.is_empty() {
-                    for label in ["reference", "encode", "difference"] {
-                        placeholder(ui, label, slot_width, viewer.is_loading());
-                    }
-                    return;
-                }
-                if viewer.wipe {
-                    wipe_pane(ui, tokens, viewer, slot_width);
-                } else {
-                    for index in 0..viewer.slots.len() {
-                        tile(ui, tokens, viewer, index, slot_width);
-                    }
-                }
-            });
+            // At 1:1 a 2160p still is far wider than the window, so the row pans
+            // sideways rather than pushing the rest of the page out of shape.
+            egui::ScrollArea::horizontal()
+                .id_salt("frame-viewer-images")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if viewer.slots.is_empty() {
+                            for label in ["reference", "encode", "difference"] {
+                                placeholder(ui, label, slot_width, viewer.is_loading());
+                            }
+                            return;
+                        }
+                        if viewer.wipe {
+                            wipe_pane(ui, tokens, viewer, slot_width);
+                        } else {
+                            for index in 0..viewer.slots.len() {
+                                tile(ui, tokens, viewer, index, slot_width);
+                            }
+                        }
+                    });
+                });
         });
 }
 
@@ -421,8 +433,8 @@ fn wipe_pane(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, slot_width:
     match (reference, encode) {
         (Some((reference_id, reference_size)), Some((encode_id, _))) => {
             let size = fit(reference_size, slot_width * 2.0, viewer.actual_size);
-            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
-            let painter = ui.painter();
+            let (rect, pane) = ui.allocate_exact_size(size, egui::Sense::click());
+            let painter = ui.painter().clone();
             let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
             painter.image(reference_id, rect, uv, egui::Color32::WHITE);
 
@@ -439,12 +451,32 @@ fn wipe_pane(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, slot_width:
                 ],
                 egui::Stroke::new(2.0, tokens.accent),
             );
+            // A grip on the line, so the one part that takes a drag looks like it.
+            let grip = egui::Rect::from_center_size(
+                egui::pos2(divider_x, rect.center().y),
+                egui::vec2(WIPE_GRIP, WIPE_GRIP * 6.0),
+            );
+            painter.rect_filled(grip, 2.0, tokens.accent);
 
-            if response.dragged() {
+            // The line takes the drag, not the whole pane. Dragging the picture itself
+            // moved the line from anywhere, which read as the image being dragged.
+            let band = egui::Rect::from_min_max(
+                egui::pos2(divider_x - WIPE_GRAB / 2.0, rect.top()),
+                egui::pos2(divider_x + WIPE_GRAB / 2.0, rect.bottom()),
+            );
+            let line = ui
+                .interact(
+                    band,
+                    ui.id().with(("wipe-line", viewer.frame)),
+                    egui::Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+
+            if line.dragged() {
                 viewer.wipe_position =
-                    wipe_after_drag(viewer.wipe_position, response.drag_delta().x, rect.width());
-            } else if response.clicked()
-                && let Some(pointer) = response.interact_pointer_pos()
+                    wipe_after_drag(viewer.wipe_position, line.drag_delta().x, rect.width());
+            } else if pane.clicked()
+                && let Some(pointer) = pane.interact_pointer_pos()
             {
                 viewer.focused = if pointer.x < divider_x {
                     Focus::Reference
@@ -515,9 +547,15 @@ fn controls(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) -> Ask {
             &mut viewer.actual_size,
             sans("1:1", 11.0, tokens.text_secondary),
         )
-        .on_hover_text("Draws each image at its own pixel size.");
+        .on_hover_text(
+            "Draws each image at its own pixel size. A fitted image hides the small \
+faults you are looking for.",
+        );
         ui.checkbox(&mut viewer.wipe, sans("wipe", 11.0, tokens.text_secondary))
-            .on_hover_text("Drags a line between the reference and the encode.");
+            .on_hover_text(
+                "Puts the reference and the encode in one pane. Drag the line to move \
+the split.",
+            );
         if ui
             .add(egui::Button::new(sans("save PNG", 11.0, tokens.text)))
             .on_hover_text("Saves the tile in view to the export folder.")
