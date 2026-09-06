@@ -221,15 +221,48 @@ pub fn timestamp(at: std::time::SystemTime) -> String {
     )
 }
 
-/// The identity of one run, as `2026-08-29T02-41-11Z-a7f3`.
+/// The identity of one run, as `2026-08-29T10-41-11.481+0800`.
 ///
-/// The suffix separates two runs that start inside the same second, which happens when
-/// a run is repeated straight away.
+/// This one names a folder that a person reads, so it reads in the clock time of that
+/// person and carries the offset from UTC. The offset keeps the name honest twice a
+/// year, when a local hour repeats. The record itself keeps UTC, because a stored
+/// moment must never be ambiguous.
+///
+/// The milliseconds separate two runs that start inside the same second. A cancelled
+/// run ends at once, so a second run can follow it inside one second, and two runs of
+/// one name would share a scratch folder and show the frames of the run before.
+///
+/// A machine that will not give its offset falls back to UTC, which the trailing `Z`
+/// says plainly. Reading the offset needs one thread on Linux and on macOS, so a run
+/// started after the worker threads exist takes the fallback there.
 pub fn run_id(at: std::time::SystemTime) -> String {
-    let nanos = at
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.subsec_nanos());
-    format!("{}-{:04x}", timestamp(at).replace(':', "-"), nanos & 0xffff)
+    let utc = time::OffsetDateTime::from(at);
+    let local = time::UtcOffset::current_local_offset()
+        .map(|offset| utc.to_offset(offset))
+        .unwrap_or(utc);
+    let offset = local.offset();
+
+    let zone = if offset.is_utc() {
+        "Z".to_string()
+    } else {
+        format!(
+            "{}{:02}{:02}",
+            if offset.is_negative() { '-' } else { '+' },
+            offset.whole_hours().abs(),
+            i32::from(offset.minutes_past_hour()).abs()
+        )
+    };
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}-{:02}-{:02}.{:03}{zone}",
+        local.year(),
+        local.month() as u8,
+        local.day(),
+        local.hour(),
+        local.minute(),
+        local.second(),
+        local.millisecond(),
+    )
 }
 
 /// The name of the per-frame file for one encode.
@@ -242,7 +275,7 @@ pub fn safe_name(label: &str) -> String {
     label
         .chars()
         .map(|character| match character {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => character,
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '+' => character,
             _ => '_',
         })
         .collect()
@@ -392,6 +425,41 @@ fn results_of(session: &Session, outcome: &RunOutcome) -> Vec<ResultRecord> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The name goes on a folder a person reads, so it carries the date, the time to
+    /// the millisecond, and which clock it was read from.
+    #[test]
+    fn a_run_is_named_for_the_moment_it_started() {
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_756_449_671_481);
+        let id = run_id(at);
+
+        let (stamp, zone) = id.split_at(23);
+        assert_eq!(stamp.len(), 23, "date, time and milliseconds: {id}");
+        assert!(
+            stamp.chars().nth(10) == Some('T') && stamp.chars().nth(19) == Some('.'),
+            "the shape is yyyy-mm-ddThh-mm-ss.mmm, not {id}"
+        );
+        assert!(
+            zone == "Z" || (zone.len() == 5 && (zone.starts_with('+') || zone.starts_with('-'))),
+            "the zone is UTC or an offset, not {zone:?}"
+        );
+        assert!(
+            !id.contains(':'),
+            "no colon, which a file system refuses: {id}"
+        );
+        assert_eq!(safe_name(&id), id, "the name needs no cleaning up");
+    }
+
+    /// A cancelled run ends at once, so a second run can start inside the same second.
+    /// Two runs of one name would share a scratch folder and show the stills of the
+    /// run before.
+    #[test]
+    fn two_runs_inside_one_second_take_different_names() {
+        let first = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_756_449_671_100);
+        let second = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_756_449_671_900);
+
+        assert_ne!(run_id(first), run_id(second));
+    }
 
     #[test]
     fn the_schema_version_is_the_first_field_a_reader_meets() {
