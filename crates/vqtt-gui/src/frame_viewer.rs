@@ -33,6 +33,25 @@ const WIPE_GRIP: f32 = 4.0;
 /// The size of the spinner that stands in for an image still being made.
 const SPINNER: f32 = 22.0;
 
+/// The height of the strip that names the frame in the window.
+const META_BAR: f32 = 28.0;
+
+/// The band at the bottom of the stage that calls up the filmstrip.
+const STRIP_BAND: f32 = 130.0;
+
+/// One filmstrip thumbnail.
+const THUMB_W: f32 = 150.0;
+const THUMB_H: f32 = 84.0;
+
+/// What the zoom control offers. Zero fits the stage.
+const ZOOMS: [(f32, &str); 5] = [
+    (0.0, "fit"),
+    (0.5, "50%"),
+    (1.0, "100% (1:1)"),
+    (2.0, "200%"),
+    (4.0, "400%"),
+];
+
 /// What came back from the worker thread.
 type Extraction = vqtt_core::Result<vqtt_run::ExtractedFrame>;
 
@@ -73,8 +92,6 @@ pub struct FrameViewer {
     pub encode: Option<FileId>,
     pub metric: Option<MetricId>,
     pub gain: u32,
-    /// True when the images are drawn at their own pixel size rather than fitted.
-    pub actual_size: bool,
     /// True when the reference and the encode share one pane behind a draggable line,
     /// instead of sitting in two tiles side by side.
     pub wipe: bool,
@@ -82,6 +99,12 @@ pub struct FrameViewer {
     pub wipe_position: f32,
     /// The tile "save PNG" acts on. Set by clicking a tile, or a side of the wipe line.
     pub focused: Focus,
+    /// True while the frames have a window of their own.
+    pub popped_out: bool,
+    /// The zoom of that window's stage. Zero means fit the stage.
+    pub zoom: f32,
+    /// True while the filmstrip shows, which the pointer decides.
+    strip_shown: bool,
     /// The worst-first order of the active series, for the worse and better controls.
     order: Vec<FrameValue>,
     slots: Vec<Slot>,
@@ -91,6 +114,9 @@ pub struct FrameViewer {
     problem: Option<String>,
     save_status: Option<String>,
     commands: Vec<String>,
+    pending_extract: Option<(u64, u32)>,
+    /// The scale the stage drew at last, for the readout in the footer.
+    stage_scale: f32,
 }
 
 impl Default for FrameViewer {
@@ -101,10 +127,12 @@ impl Default for FrameViewer {
             encode: None,
             metric: None,
             gain: 0,
-            actual_size: false,
             wipe: false,
             wipe_position: 0.5,
             focused: Focus::default(),
+            popped_out: false,
+            zoom: 0.0,
+            strip_shown: false,
             order: Vec::new(),
             slots: Vec::new(),
             pending: None,
@@ -112,6 +140,8 @@ impl Default for FrameViewer {
             problem: None,
             save_status: None,
             commands: Vec::new(),
+            pending_extract: None,
+            stage_scale: 0.0,
         }
     }
 }
@@ -120,8 +150,6 @@ impl Default for FrameViewer {
 #[derive(Debug, PartialEq)]
 pub enum Ask {
     Nothing,
-    /// Extract this frame at this gain.
-    Extract(u64, u32),
     /// Copy this cached still to the export folder. `label` and `gain` name the file;
     /// `gain` is only meaningful when `label` is "difference".
     Save {
@@ -243,7 +271,31 @@ impl FrameViewer {
         {
             self.frame = Some(next);
             self.slots.clear();
+            self.pending_extract = Some((next, self.gain));
         }
+    }
+
+    /// Sets the gain, and asks for the difference that goes with it.
+    ///
+    /// Only the difference carries the gain, so the two stills stay on screen while the
+    /// new one is drawn.
+    fn set_gain(&mut self, gain: u32) {
+        if self.gain == gain {
+            return;
+        }
+        self.gain = gain;
+        self.drop_difference();
+        if let Some(frame) = self.frame {
+            self.pending_extract = Some((frame, gain));
+        }
+    }
+
+    /// Takes the extraction a control asked for, if one is waiting.
+    ///
+    /// The caller drains this once a frame, so two control rows asking for the same
+    /// frame still cost one extraction.
+    pub fn take_extract(&mut self) -> Option<(u64, u32)> {
+        self.pending_extract.take()
     }
 }
 
@@ -358,8 +410,8 @@ fn images(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, frame: Option<
             let available = ui.available_width();
             let slot_width = ((available - 20.0) / 3.0).max(60.0);
             let gap = ui.spacing().item_spacing.x;
-            let one = slot_size(frame, slot_width, viewer.actual_size);
-            let wide = slot_size(frame, slot_width * 2.0, viewer.actual_size);
+            let one = slot_size(frame, slot_width);
+            let wide = slot_size(frame, slot_width * 2.0);
             let total = if viewer.wipe {
                 wide.x + gap + one.x
             } else {
@@ -369,28 +421,22 @@ fn images(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, frame: Option<
             // edge, so a frame that is narrower than its box is not lopsided.
             let lead = ((available - total) / 2.0).max(0.0);
 
-            // At 1:1 a 2160p still is far wider than the window, so the row pans
-            // sideways rather than pushing the rest of the page out of shape.
-            egui::ScrollArea::horizontal()
-                .id_salt("frame-viewer-images")
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.add_space(lead);
-                        if viewer.slots.is_empty() {
-                            for label in ["reference", "encode", "difference"] {
-                                placeholder(ui, label, one, viewer.is_loading());
-                            }
-                            return;
-                        }
-                        if viewer.wipe {
-                            wipe_pane(ui, tokens, viewer, wide, one);
-                        } else {
-                            for index in 0..viewer.slots.len() {
-                                tile(ui, tokens, viewer, index, one);
-                            }
-                        }
-                    });
-                });
+            ui.horizontal(|ui| {
+                ui.add_space(lead);
+                if viewer.slots.is_empty() {
+                    for label in ["reference", "encode", "difference"] {
+                        placeholder(ui, label, one, viewer.is_loading());
+                    }
+                    return;
+                }
+                if viewer.wipe {
+                    wipe_pane(ui, tokens, viewer, wide, one);
+                } else {
+                    for index in 0..viewer.slots.len() {
+                        tile(ui, tokens, viewer, index, one);
+                    }
+                }
+            });
         });
 }
 
@@ -544,12 +590,21 @@ fn wipe_pane(
     tile(ui, tokens, viewer, 2, one);
 }
 
-fn fit(size: egui::Vec2, slot_width: f32, actual: bool) -> egui::Vec2 {
-    if actual {
-        return size;
-    }
+fn fit(size: egui::Vec2, slot_width: f32) -> egui::Vec2 {
     let scale = (slot_width / size.x).min(SLOT_HEIGHT / size.y).min(1.0);
     size * scale
+}
+
+/// How much to shrink a frame so that it fits a stage of this size.
+///
+/// The stage is measured, never guessed from the height of the chrome around it. A
+/// guess that is a few pixels out leaves the image overflowing and the stage carrying a
+/// scroll bar it never needed.
+fn fit_scale(frame: egui::Vec2, stage: egui::Vec2) -> f32 {
+    if frame.x <= 0.0 || frame.y <= 0.0 {
+        return 1.0;
+    }
+    (stage.x / frame.x).min(stage.y / frame.y).max(0.02)
 }
 
 /// The box one image sits in, taken from the shape of the reference frame.
@@ -558,9 +613,9 @@ fn fit(size: egui::Vec2, slot_width: f32, actual: bool) -> egui::Vec2 {
 /// the difference is drawn. Reading the shape from the file rather than from a loaded
 /// texture is what lets the viewer draw the frames in the right shape before it has
 /// any, and it keeps the box the same size once they arrive.
-fn slot_size(frame: Option<egui::Vec2>, slot_width: f32, actual: bool) -> egui::Vec2 {
+fn slot_size(frame: Option<egui::Vec2>, slot_width: f32) -> egui::Vec2 {
     match frame {
-        Some(frame) if frame.x > 0.0 && frame.y > 0.0 => fit(frame, slot_width, actual),
+        Some(frame) if frame.x > 0.0 && frame.y > 0.0 => fit(frame, slot_width),
         _ => egui::vec2(slot_width, SLOT_HEIGHT),
     }
 }
@@ -634,7 +689,6 @@ fn spinner(
 
 fn controls(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) -> Ask {
     let mut ask = Ask::Nothing;
-    let before = (viewer.frame, viewer.gain);
     let mut save_clicked = false;
 
     ui.horizontal_wrapped(|ui| {
@@ -653,19 +707,21 @@ fn controls(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) -> Ask {
             let button =
                 egui::Button::new(label).fill(if chosen { tokens.accent } else { tokens.sunken });
             if ui.add(button).clicked() {
-                viewer.gain = gain;
+                viewer.set_gain(gain);
             }
         }
 
         ui.add_space(10.0);
-        ui.checkbox(
-            &mut viewer.actual_size,
-            sans("1:1", 11.0, tokens.text_secondary),
-        )
-        .on_hover_text(
-            "Draws each image at its own pixel size. A fitted image hides the small \
-faults you are looking for.",
-        );
+        if ui
+            .add(egui::Button::new(sans("1:1 ↗", 11.0, tokens.text)))
+            .on_hover_text(
+                "Opens the frames in their own window, at their own pixel size. A fitted \
+image hides the small faults you are looking for.",
+            )
+            .clicked()
+        {
+            viewer.popped_out = true;
+        }
         ui.checkbox(&mut viewer.wipe, sans("wipe", 11.0, tokens.text_secondary))
             .on_hover_text(
                 "Puts the reference and the encode in one pane. Drag the line to move \
@@ -696,16 +752,7 @@ the split.",
         }
     });
 
-    if before != (viewer.frame, viewer.gain)
-        && let Some(frame) = viewer.frame
-    {
-        if before.0 == viewer.frame {
-            viewer.drop_difference();
-        } else {
-            viewer.slots.clear();
-        }
-        ask = Ask::Extract(frame, viewer.gain);
-    } else if save_clicked && let Some(save) = save_ask(viewer) {
+    if save_clicked && let Some(save) = save_ask(viewer) {
         ask = save;
     }
 
@@ -723,6 +770,457 @@ the split.",
     ask
 }
 
+/// Draws the pop-out window and reports what the reader asked for.
+///
+/// The window is a photo viewer: one frame fills the stage, and the others wait in a
+/// filmstrip that comes up when the pointer nears the bottom edge. `frame` is the size
+/// of the reference, which every still is drawn at.
+pub fn show_window(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    viewer: &mut FrameViewer,
+    frame: Option<egui::Vec2>,
+    encode_name: Option<&str>,
+) -> Ask {
+    // The window title bar carries the close button, so closing is the reader telling
+    // the panel to take the frames back. Nothing is thrown away.
+    let shut = ui
+        .input(|input| input.viewport().close_requested() || input.key_pressed(egui::Key::Escape));
+    if shut {
+        viewer.popped_out = false;
+    }
+
+    let mut ask = Ask::Nothing;
+
+    egui::Panel::top("popout-meta")
+        .exact_size(META_BAR)
+        .resizable(false)
+        .frame(
+            egui::Frame::default()
+                .fill(tokens.panel)
+                .stroke(egui::Stroke::new(1.0, tokens.border))
+                .inner_margin(egui::Margin::symmetric(14, 6)),
+        )
+        .show(ui, |ui| meta_strip(ui, tokens, viewer, encode_name));
+
+    egui::Panel::bottom("popout-footer")
+        .resizable(false)
+        .frame(
+            egui::Frame::default()
+                .fill(tokens.panel)
+                .stroke(egui::Stroke::new(1.0, tokens.border))
+                .inner_margin(egui::Margin::symmetric(14, 8)),
+        )
+        .show(ui, |ui| {
+            ask = footer(ui, tokens, viewer, frame);
+        });
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::default().fill(FRAME_VIEWER_GRAY))
+        .show(ui, |ui| stage(ui, tokens, viewer, frame));
+
+    ask
+}
+
+/// The line that says which frame is on the stage.
+fn meta_strip(ui: &mut Ui, tokens: &Tokens, viewer: &FrameViewer, encode_name: Option<&str>) {
+    ui.horizontal_centered(|ui| {
+        let Some(frame) = viewer.frame else {
+            ui.label(mono("no frame open", 11.5, tokens.text_muted));
+            return;
+        };
+        ui.label(mono(format!("frame {frame}"), 11.5, tokens.text_secondary));
+        if let Some(name) = encode_name {
+            ui.label(mono(format!("· {name}"), 11.5, tokens.text_secondary));
+        }
+        if let (Some(metric), Some(value)) = (viewer.metric, viewer.value()) {
+            ui.label(mono(
+                format!("· {} {value:.3}", metric.def().label),
+                11.5,
+                tokens.text_secondary,
+            ));
+        }
+        if let Some(rank) = viewer.rank() {
+            ui.label(mono(format!("· worst #{rank}"), 11.0, tokens.text_muted));
+        }
+    });
+}
+
+/// The stage: one image, centered, at the scale the zoom control asked for.
+fn stage(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, frame: Option<egui::Vec2>) {
+    // The stage is measured, never worked out from the height of the bars around it.
+    let available = ui.available_size();
+    let natural = match frame {
+        Some(frame) if frame.x > 0.0 && frame.y > 0.0 => frame,
+        _ => egui::vec2(SLOT_HEIGHT * 16.0 / 9.0, SLOT_HEIGHT),
+    };
+    let scale = if viewer.zoom > 0.0 {
+        viewer.zoom
+    } else {
+        fit_scale(natural, available)
+    };
+    viewer.stage_scale = scale;
+    let size = natural * scale;
+
+    let stage_rect = ui.max_rect();
+    let mut draw = |ui: &mut Ui, at: egui::Rect| {
+        if viewer.wipe && viewer.focused != Focus::Difference {
+            stage_wipe(ui, tokens, viewer, at);
+        } else {
+            stage_one(ui, viewer, at);
+        }
+    };
+
+    // A scroll area only appears once the image really is larger than the stage. One
+    // that is always there reserves room for its own bars, which is what makes a fitted
+    // image overflow by the width of the bar and carry one it never needed.
+    if size.x > available.x + 0.5 || size.y > available.y + 0.5 {
+        egui::ScrollArea::both()
+            .id_salt("popout-stage")
+            .show(ui, |ui| {
+                let region = egui::vec2(size.x.max(available.x), size.y.max(available.y));
+                let (rect, _) = ui.allocate_exact_size(region, egui::Sense::hover());
+                draw(ui, egui::Rect::from_center_size(rect.center(), size));
+            });
+    } else {
+        let (rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
+        draw(ui, egui::Rect::from_center_size(rect.center(), size));
+    }
+
+    filmstrip(ui, tokens, viewer, stage_rect, frame);
+}
+
+/// The focused image alone.
+fn stage_one(ui: &mut Ui, viewer: &FrameViewer, at: egui::Rect) {
+    let label = viewer.focused.label();
+    match texture_of(viewer, label) {
+        Some(id) => {
+            ui.painter().image(id, at, full_uv(), egui::Color32::WHITE);
+        }
+        None => spinner_box(ui, at, viewer.is_loading()),
+    }
+}
+
+/// The reference and the encode in one pane, split by a line the reader drags.
+fn stage_wipe(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, at: egui::Rect) {
+    let (Some(reference), Some(encode)) = (
+        texture_of(viewer, "reference"),
+        texture_of(viewer, "encode"),
+    ) else {
+        spinner_box(ui, at, viewer.is_loading());
+        return;
+    };
+
+    let painter = ui.painter().clone();
+    painter.image(reference, at, full_uv(), egui::Color32::WHITE);
+
+    let divider_x = at.left() + at.width() * viewer.wipe_position;
+    let right = egui::Rect::from_min_max(egui::pos2(divider_x, at.top()), at.right_bottom());
+    painter
+        .with_clip_rect(right)
+        .image(encode, at, full_uv(), egui::Color32::WHITE);
+    painter.line_segment(
+        [
+            egui::pos2(divider_x, at.top()),
+            egui::pos2(divider_x, at.bottom()),
+        ],
+        egui::Stroke::new(2.0, tokens.accent),
+    );
+    painter.rect_filled(
+        egui::Rect::from_center_size(
+            egui::pos2(divider_x, at.center().y),
+            egui::vec2(WIPE_GRIP, WIPE_GRIP * 6.0),
+        ),
+        2.0,
+        tokens.accent,
+    );
+
+    // The line takes the drag, not the picture, the same rule the panel follows.
+    let band = egui::Rect::from_min_max(
+        egui::pos2(divider_x - WIPE_GRAB / 2.0, at.top()),
+        egui::pos2(divider_x + WIPE_GRAB / 2.0, at.bottom()),
+    );
+    let line = ui
+        .interact(
+            band,
+            ui.id().with(("popout-wipe-line", viewer.frame)),
+            egui::Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+    if line.dragged() {
+        viewer.wipe_position =
+            wipe_after_drag(viewer.wipe_position, line.drag_delta().x, at.width());
+        return;
+    }
+
+    // Clicking a half focuses it, so "save PNG" writes the side being looked at.
+    let pane = ui.interact(
+        at,
+        ui.id().with(("popout-wipe-pane", viewer.frame)),
+        egui::Sense::click(),
+    );
+    if pane.clicked()
+        && let Some(pointer) = pane.interact_pointer_pos()
+    {
+        viewer.focused = if pointer.x < divider_x {
+            Focus::Reference
+        } else {
+            Focus::Encode
+        };
+    }
+}
+
+/// The thumbnails that change which image the stage holds.
+///
+/// They ride over the bottom of the stage on a dark gradient, so they read against any
+/// frame. The gradient and the dimming touch the thumbnails only, never the picture on
+/// the stage.
+fn filmstrip(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    viewer: &mut FrameViewer,
+    stage: egui::Rect,
+    frame: Option<egui::Vec2>,
+) {
+    let names: Vec<(Focus, String)> = if viewer.wipe {
+        vec![
+            (Focus::Encode, "reference ‖ encode".to_string()),
+            (Focus::Difference, format!("difference ×{}", viewer.gain)),
+        ]
+    } else {
+        vec![
+            (Focus::Reference, "reference".to_string()),
+            (Focus::Encode, "encode".to_string()),
+            (Focus::Difference, format!("difference ×{}", viewer.gain)),
+        ]
+    };
+
+    let gap = 10.0;
+    let width = THUMB_W * names.len() as f32 + gap * (names.len() as f32 - 1.0);
+    let strip = egui::Rect::from_min_max(
+        egui::pos2(
+            stage.center().x - width / 2.0 - 14.0,
+            stage.bottom() - THUMB_H - 28.0,
+        ),
+        egui::pos2(stage.center().x + width / 2.0 + 14.0, stage.bottom()),
+    );
+
+    // The strip answers the pointer: near the bottom of the stage, or over itself.
+    let pointer = ui.input(|input| input.pointer.hover_pos());
+    viewer.strip_shown = pointer.is_some_and(|at| {
+        stage.contains(at) && at.y > stage.bottom() - STRIP_BAND || strip.contains(at)
+    });
+    if !viewer.strip_shown {
+        return;
+    }
+
+    let painter = ui.painter().clone();
+    painter.rect_filled(strip, 0.0, egui::Color32::from_black_alpha(140));
+
+    let mut left = stage.center().x - width / 2.0;
+    for (focus, label) in names {
+        let box_rect = egui::Rect::from_min_size(
+            egui::pos2(left, strip.top() + 14.0),
+            egui::vec2(THUMB_W, THUMB_H),
+        );
+        left += THUMB_W + gap;
+
+        let chosen = viewer.focused == focus;
+        // The dimming is on the thumbnail, which is chrome, and never on the stage.
+        let tint = if chosen {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_white_alpha(180)
+        };
+        match texture_of(viewer, thumb_source(focus)) {
+            Some(id) => {
+                painter.image(id, fit_into(box_rect, frame), full_uv(), tint);
+            }
+            None => {
+                painter.rect_filled(box_rect, 2.0, egui::Color32::from_gray(0x8a));
+            }
+        }
+        if chosen {
+            painter.rect_stroke(
+                box_rect,
+                2.0,
+                egui::Stroke::new(2.0, tokens.accent),
+                egui::StrokeKind::Outside,
+            );
+        }
+        painter.text(
+            egui::pos2(box_rect.center().x, box_rect.bottom() - 6.0),
+            egui::Align2::CENTER_BOTTOM,
+            &label,
+            egui::FontId::new(
+                10.5,
+                egui::FontFamily::Name(crate::fonts::MONO_FAMILY.into()),
+            ),
+            egui::Color32::from_rgb(0xf2, 0xf2, 0xf2),
+        );
+
+        if ui
+            .interact(
+                box_rect,
+                ui.id().with(("popout-thumb", focus.label())),
+                egui::Sense::click(),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            viewer.focused = focus;
+        }
+    }
+}
+
+/// Which still stands for one filmstrip entry.
+fn thumb_source(focus: Focus) -> &'static str {
+    match focus {
+        Focus::Reference => "reference",
+        Focus::Encode => "encode",
+        Focus::Difference => "difference",
+    }
+}
+
+/// The footer: stepping, zoom, gain, wipe, save, and what the stage is showing.
+fn footer(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    viewer: &mut FrameViewer,
+    frame: Option<egui::Vec2>,
+) -> Ask {
+    let mut ask = Ask::Nothing;
+
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add(egui::Button::new(sans("← worse", 11.0, tokens.text)))
+            .on_hover_text("The next frame that measured worse.")
+            .clicked()
+        {
+            viewer.step(-1);
+        }
+        if ui
+            .add(egui::Button::new(sans("better →", 11.0, tokens.text)))
+            .on_hover_text("The next frame that measured better.")
+            .clicked()
+        {
+            viewer.step(1);
+        }
+
+        ui.add_space(10.0);
+        let chosen = ZOOMS
+            .iter()
+            .find(|(value, _)| (*value - viewer.zoom).abs() < f32::EPSILON)
+            .map_or("fit", |(_, label)| *label);
+        egui::ComboBox::from_id_salt("popout-zoom")
+            .selected_text(sans(chosen, 11.0, tokens.text))
+            .show_ui(ui, |ui| {
+                for (value, label) in ZOOMS {
+                    ui.selectable_value(&mut viewer.zoom, value, sans(label, 11.0, tokens.text));
+                }
+            });
+
+        ui.add_space(6.0);
+        ui.label(sans("gain", 11.0, tokens.text_muted));
+        for gain in GAINS {
+            let on = viewer.gain == gain;
+            let label = sans(
+                format!("x{gain}"),
+                11.0,
+                if on { tokens.on_accent } else { tokens.text },
+            );
+            let button =
+                egui::Button::new(label).fill(if on { tokens.accent } else { tokens.sunken });
+            if ui.add(button).clicked() {
+                viewer.set_gain(gain);
+            }
+        }
+
+        ui.add_space(10.0);
+        let was = viewer.wipe;
+        ui.checkbox(&mut viewer.wipe, sans("wipe", 11.0, tokens.text_secondary))
+            .on_hover_text(
+                "Puts the reference and the encode in one pane. Drag the line to move the split.",
+            );
+        // The pair is one tile, so the reference on its own is not a thing to focus.
+        if viewer.wipe && !was && viewer.focused == Focus::Reference {
+            viewer.focused = Focus::Encode;
+        }
+
+        if ui
+            .add(egui::Button::new(sans("save PNG", 11.0, tokens.text)))
+            .on_hover_text("Saves the image on the stage to the export folder.")
+            .clicked()
+            && let Some(save) = save_ask(viewer)
+        {
+            ask = save;
+        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(size) = frame
+                && viewer.stage_scale > 0.0
+            {
+                ui.label(mono(
+                    format!(
+                        "{} × {} · {}%",
+                        size.x as u32,
+                        size.y as u32,
+                        (viewer.stage_scale * 100.0).round() as i32
+                    ),
+                    11.0,
+                    tokens.text_muted,
+                ));
+            }
+        });
+    });
+
+    ask
+}
+
+/// The texture of one still, when it is loaded.
+fn texture_of(viewer: &FrameViewer, label: &str) -> Option<egui::TextureId> {
+    viewer
+        .slots
+        .iter()
+        .find(|slot| slot.label == label)
+        .and_then(|slot| slot.texture.as_ref())
+        .map(|texture| texture.id())
+}
+
+/// The whole of an image.
+fn full_uv() -> egui::Rect {
+    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+}
+
+/// The largest rect of the frame's shape that fits a box, centered in it.
+fn fit_into(box_rect: egui::Rect, frame: Option<egui::Vec2>) -> egui::Rect {
+    let Some(frame) = frame.filter(|size| size.x > 0.0 && size.y > 0.0) else {
+        return box_rect;
+    };
+    let scale = (box_rect.width() / frame.x).min(box_rect.height() / frame.y);
+    egui::Rect::from_center_size(box_rect.center(), frame * scale)
+}
+
+/// A spinner on the gray, for a stage whose image is still being made.
+fn spinner_box(ui: &mut Ui, at: egui::Rect, loading: bool) {
+    let ink = egui::Color32::from_rgb(0x33, 0x33, 0x33);
+    ui.painter().rect_stroke(
+        at,
+        2.0,
+        egui::Stroke::new(1.0, ink),
+        egui::StrokeKind::Inside,
+    );
+    if loading {
+        spinner(
+            ui.painter(),
+            at.center(),
+            SPINNER * 0.5,
+            ink,
+            ui.input(|input| input.time),
+        );
+        ui.ctx().request_repaint();
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -860,34 +1358,25 @@ mod tests {
     /// reader sees before the frames arrive is the box the frames land in.
     #[test]
     fn the_empty_box_keeps_the_shape_of_the_reference_frame() {
-        let wide = slot_size(Some(egui::vec2(1920.0, 1080.0)), 300.0, false);
+        let wide = slot_size(Some(egui::vec2(1920.0, 1080.0)), 300.0);
         assert!(
             (wide.x / wide.y - 16.0 / 9.0).abs() < 0.01,
             "a 16:9 reference gives a 16:9 box, not {wide:?}"
         );
 
-        let tall = slot_size(Some(egui::vec2(1080.0, 1920.0)), 300.0, false);
+        let tall = slot_size(Some(egui::vec2(1080.0, 1920.0)), 300.0);
         assert!(tall.y > tall.x, "a portrait reference gives a portrait box");
         assert!(tall.y <= SLOT_HEIGHT, "the box stays inside the row height");
     }
 
     #[test]
     fn a_reference_of_no_size_falls_back_to_the_plain_box() {
+        assert_eq!(slot_size(None, 300.0), egui::vec2(300.0, SLOT_HEIGHT));
         assert_eq!(
-            slot_size(None, 300.0, false),
-            egui::vec2(300.0, SLOT_HEIGHT)
-        );
-        assert_eq!(
-            slot_size(Some(egui::vec2(0.0, 0.0)), 300.0, false),
+            slot_size(Some(egui::vec2(0.0, 0.0)), 300.0),
             egui::vec2(300.0, SLOT_HEIGHT),
             "a zero size never divides by zero"
         );
-    }
-
-    #[test]
-    fn one_to_one_draws_the_reference_at_its_own_size() {
-        let frame = egui::vec2(1920.0, 1080.0);
-        assert_eq!(slot_size(Some(frame), 300.0, true), frame);
     }
 
     #[test]

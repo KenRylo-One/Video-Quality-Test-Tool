@@ -44,6 +44,8 @@ pub struct VqttApp {
     /// What the last export did, as one line for the Notes section.
     export_report: Option<String>,
     frame_viewer: crate::frame_viewer::FrameViewer,
+    /// True once the pop-out window has been given its opening size.
+    popout_built: bool,
 }
 
 impl VqttApp {
@@ -71,6 +73,55 @@ impl VqttApp {
             scan: None,
             export_report: None,
             frame_viewer: crate::frame_viewer::FrameViewer::default(),
+            popout_built: false,
+        }
+    }
+
+    /// Draws the frame viewer in a window of its own, and reports a save it asked for.
+    ///
+    /// This is an immediate viewport and not the deferred one. A deferred callback must
+    /// be `Send + Sync + 'static`, so it cannot borrow the viewer, and the viewer holds
+    /// the channel an extraction arrives on. An immediate one borrows it and hands the
+    /// answer straight back.
+    fn frame_viewer_window(
+        &mut self,
+        context: &egui::Context,
+    ) -> Option<(std::path::PathBuf, &'static str, u64, u32)> {
+        let size = crate::frame_viewer::reference_size(&self.session.files);
+        let encode_name = self
+            .frame_viewer
+            .encode
+            .and_then(|id| self.session.files.get(id))
+            .map(|file| file.label.clone());
+
+        // The size is offered once. Sending it every frame would undo the reader's own
+        // resize on the frame after.
+        let mut builder = egui::ViewportBuilder::default().with_title("Frame viewer");
+        if !self.popout_built {
+            builder = builder
+                .with_inner_size([1280.0, 820.0])
+                .with_min_inner_size([480.0, 320.0]);
+            self.popout_built = true;
+        }
+
+        let tokens = self.tokens;
+        let viewer = &mut self.frame_viewer;
+        let ask = context.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("frame-viewer-popout"),
+            builder,
+            |ui, _class| {
+                crate::frame_viewer::show_window(ui, &tokens, viewer, size, encode_name.as_deref())
+            },
+        );
+
+        match ask {
+            crate::frame_viewer::Ask::Save {
+                path,
+                label,
+                frame,
+                gain,
+            } => Some((path, label, frame, gain)),
+            crate::frame_viewer::Ask::Nothing => None,
         }
     }
 
@@ -532,17 +583,14 @@ impl eframe::App for VqttApp {
                             }
                             right::Request::Nothing => {}
                         }
-                        match asked.viewer {
-                            crate::frame_viewer::Ask::Extract(frame, gain) => {
-                                wants_frame = Some((frame, gain));
-                            }
-                            crate::frame_viewer::Ask::Save {
-                                path,
-                                label,
-                                frame,
-                                gain,
-                            } => wants_save = Some((path, label, frame, gain)),
-                            crate::frame_viewer::Ask::Nothing => {}
+                        if let crate::frame_viewer::Ask::Save {
+                            path,
+                            label,
+                            frame,
+                            gain,
+                        } = asked.viewer
+                        {
+                            wants_save = Some((path, label, frame, gain));
                         }
                     });
 
@@ -557,10 +605,26 @@ impl eframe::App for VqttApp {
                 });
             });
 
+        // The panel has given the viewer back, so the window can borrow it now. Drawing
+        // it here rather than inside the panel is what keeps the two borrows apart.
+        if self.frame_viewer.popped_out {
+            if let Some(save) = self.frame_viewer_window(&context) {
+                wants_save = Some(save);
+            }
+        } else {
+            // The next opening gets its size again.
+            self.popout_built = false;
+        }
+
         // These write files, start threads or open a picker, so they run after the
         // frame rather than inside the closure that is still borrowing the session.
         if asked_to_export {
             self.export_run();
+        }
+        // One drain a frame, so the panel and the window asking for the same frame
+        // still cost one extraction.
+        if let Some((frame, gain)) = self.frame_viewer.take_extract() {
+            wants_frame = Some((frame, gain));
         }
         if let Some((encode, metric, frame)) = open_frame
             && let Some(run_state) = &self.run
