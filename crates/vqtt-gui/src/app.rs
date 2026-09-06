@@ -132,20 +132,18 @@ did not reach this score. The images below are corrected and the number is not."
         lines
     }
 
-    /// The folder Settings holds, or one the user chooses now.
+    /// The folder Settings holds, or the one this system keeps documents in.
     ///
-    /// The picker only appears the first time, so export and save-PNG both take one
-    /// click after that.
+    /// An export never stops to ask. Settings holds the path when the user wants
+    /// another one, and an empty setting means the system default, which is what the
+    /// field in Settings says.
     fn resolve_export_folder(&mut self) -> Option<std::path::PathBuf> {
-        match &self.session.settings.export_folder {
-            Some(folder) => Some(folder.clone()),
-            None => {
-                let chosen = rfd::FileDialog::new().pick_folder()?;
-                self.session.settings.export_folder = Some(chosen.clone());
-                self.session.save_settings();
-                Some(chosen)
-            }
-        }
+        let folder = match &self.session.settings.export_folder {
+            Some(folder) => folder.clone(),
+            None => vqtt_run::dirs::folder(vqtt_run::dirs::Kind::Exports)?,
+        };
+        std::fs::create_dir_all(&folder).ok()?;
+        Some(folder)
     }
 
     /// Writes the run to a folder the user chooses, and remembers it for next time.

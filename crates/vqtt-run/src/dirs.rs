@@ -14,6 +14,9 @@ pub enum Kind {
     Config,
     /// What the tool can build again. Deleting it costs one rescan.
     Cache,
+    /// What a run wrote for the user to read. This one is meant to be found, so it
+    /// sits with the documents rather than in an application folder.
+    Exports,
 }
 
 /// The environment values that decide the answer.
@@ -71,6 +74,9 @@ pub fn resolve(kind: Kind, env: &Environment) -> Option<PathBuf> {
                 .join("Caches")
                 .join(FOLDER),
         ),
+        // Every system keeps the user's own documents in the same place, and a person
+        // looking for a graph they exported looks there first.
+        (_, Kind::Exports) => Some(env.home.as_ref()?.join("Documents").join(FOLDER)),
         (_, Kind::Config) => xdg(env.xdg_config.as_deref(), env.home.as_deref(), ".config"),
         (_, Kind::Cache) => xdg(env.xdg_cache.as_deref(), env.home.as_deref(), ".cache"),
     }
@@ -107,6 +113,45 @@ mod tests {
             home: Some(PathBuf::from("/home/ada")),
             ..Environment::default()
         }
+    }
+
+    /// An export is the one thing here a person goes looking for, so it lands with the
+    /// documents on every system rather than in a folder the system hides.
+    #[test]
+    fn every_system_exports_into_the_documents_folder() {
+        let mut env = windows();
+        env.home = Some(PathBuf::from(r"C:\Users\ada"));
+        assert_eq!(
+            resolve(Kind::Exports, &env).unwrap(),
+            PathBuf::from(r"C:\Users\ada")
+                .join("Documents")
+                .join("vqtt")
+        );
+
+        for os in ["macos", "linux"] {
+            assert_eq!(
+                resolve(Kind::Exports, &unix(os)).unwrap(),
+                PathBuf::from("/home/ada").join("Documents").join("vqtt"),
+                "{os} exports beside the documents"
+            );
+        }
+    }
+
+    /// The export folder never reads `XDG_CONFIG_HOME`, which names where settings go
+    /// and not where a person keeps work they want to find again.
+    #[test]
+    fn the_export_folder_ignores_the_xdg_settings_variable() {
+        let env = Environment {
+            os: "linux",
+            home: Some(PathBuf::from("/home/ada")),
+            xdg_config: Some(PathBuf::from("/srv/settings")),
+            ..Environment::default()
+        };
+
+        assert_eq!(
+            resolve(Kind::Exports, &env).unwrap(),
+            PathBuf::from("/home/ada").join("Documents").join("vqtt")
+        );
     }
 
     #[test]
