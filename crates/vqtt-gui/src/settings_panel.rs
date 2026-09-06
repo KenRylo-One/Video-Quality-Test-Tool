@@ -128,21 +128,33 @@ fn binary_row(
     state: &mut SettingsUi,
     id: BinaryId,
 ) {
+    // A stand-in for a back end that is already here changes no number, so the row
+    // goes quiet rather than sending the reader after a program they do not need.
+    let spare = session.inventory.not_needed(id);
+
     card(ui, tokens, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            ui.label(mono(id.display_name(), 12.0, tokens.text));
+            let name = if spare.is_some() {
+                tokens.text_muted
+            } else {
+                tokens.text
+            };
+            ui.label(mono(id.display_name(), 12.0, name));
             ui.with_layout(
                 egui::Layout::right_to_left(egui::Align::Center),
-                |ui| match session.inventory.get(id) {
-                    Some(found) => {
+                |ui| match (spare, session.inventory.get(id)) {
+                    (Some(_), _) => {
+                        ui.label(mono("not needed", 10.5, tokens.text_muted));
+                    }
+                    (None, Some(found)) => {
                         let version = found.capabilities.version_label().to_string();
                         ui.label(mono(format!("found · {version}"), 10.5, tokens.good));
                     }
-                    None if state.scanning => {
+                    (None, None) if state.scanning => {
                         ui.label(mono("looking…", 10.5, tokens.text_muted));
                     }
-                    None => {
+                    (None, None) => {
                         ui.label(mono("not found", 10.5, tokens.warn));
                     }
                 },
@@ -150,6 +162,7 @@ fn binary_row(
         });
 
         ui.add_space(4.0);
+        ui.add_enabled_ui(spare.is_none(), |ui| {
         ui.horizontal(|ui| {
             let text = state.paths.entry(id).or_default();
             ui.add(
@@ -167,6 +180,7 @@ fn binary_row(
                 state.rescan = Some((id, path));
             }
         });
+        });
 
         ui.add_space(2.0);
         ui.label(sans(
@@ -174,6 +188,10 @@ fn binary_row(
             11.0,
             tokens.text_muted,
         ));
+        if let Some(reason) = spare {
+            ui.label(sans(reason, 11.0, tokens.note_text).italics());
+            return;
+        }
         if session.inventory.get(id).is_none() {
             ui.horizontal_wrapped(|ui| {
                 ui.label(sans("Get it from", 11.0, tokens.text_muted));

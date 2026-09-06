@@ -229,6 +229,17 @@ impl Inventory {
             Requirement::VshipMetric(name) => binary.capabilities.vship_metrics.contains(*name),
         }
     }
+
+    pub fn not_needed(&self, id: BinaryId) -> Option<&'static str> {
+        match id {
+            BinaryId::Vmaf
+                if self.satisfies(BinaryId::Ffmpeg, &Requirement::FfmpegFilter("libvmaf")) =>
+            {
+                Some("This FFmpeg has the libvmaf filter, which gives VMAF already.")
+            }
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +266,34 @@ mod tests {
         let inventory = Inventory::new();
         assert!(inventory.is_empty());
         assert!(!inventory.satisfies(BinaryId::Ffmpeg, &Requirement::FfmpegFilter("psnr")));
+    }
+
+    /// The `vmaf` binary stands in for the libvmaf filter. An FFmpeg that has the
+    /// filter makes it dead weight, and a row that still asks for it sends the reader
+    /// after a program that would change no number.
+    #[test]
+    fn the_vmaf_binary_is_not_needed_once_ffmpeg_has_the_libvmaf_filter() {
+        let mut inventory = Inventory::new();
+        inventory.insert(ffmpeg_with(&["psnr", "libvmaf"], &["vmaf"]));
+
+        assert!(inventory.not_needed(BinaryId::Vmaf).is_some());
+        assert!(
+            inventory.not_needed(BinaryId::Ffmpeg).is_none(),
+            "the thing itself is always needed"
+        );
+        assert!(inventory.not_needed(BinaryId::Ffvship).is_none());
+    }
+
+    #[test]
+    fn the_vmaf_binary_is_needed_when_ffmpeg_has_no_libvmaf_filter() {
+        let mut inventory = Inventory::new();
+        inventory.insert(ffmpeg_with(&["psnr", "ssim"], &[]));
+        assert!(inventory.not_needed(BinaryId::Vmaf).is_none());
+
+        assert!(
+            Inventory::new().not_needed(BinaryId::Vmaf).is_none(),
+            "a machine with no FFmpeg at all still needs it"
+        );
     }
 
     #[test]
