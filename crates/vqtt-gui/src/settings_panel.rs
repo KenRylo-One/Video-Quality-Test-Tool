@@ -51,13 +51,7 @@ pub fn show(ui: &mut Ui, tokens: &Tokens, session: &mut Session, state: &mut Set
     ui.horizontal(|ui| {
         ui.label(sans("Settings", 15.0, tokens.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui
-                .add(
-                    egui::Label::new(mono("✕", 12.0, tokens.text_muted))
-                        .sense(egui::Sense::click()),
-                )
-                .clicked()
-            {
+            if crate::widgets::close_icon(ui, 13.0, tokens.text_muted).clicked() {
                 state.open = false;
             }
         });

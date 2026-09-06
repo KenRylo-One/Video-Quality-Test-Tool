@@ -275,11 +275,7 @@ fn header(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) {
     let response = ui
         .horizontal(|ui| {
             ui.set_width(ui.available_width());
-            ui.label(mono(
-                if viewer.open { "▾" } else { "▸" },
-                11.0,
-                tokens.text_muted,
-            ));
+            crate::widgets::caret_icon(ui, 11.0, tokens.text_muted, viewer.open);
             ui.label(sans("Frame viewer", 15.0, tokens.text).strong());
 
             if let (Some(frame), Some(metric)) = (viewer.frame, viewer.metric) {

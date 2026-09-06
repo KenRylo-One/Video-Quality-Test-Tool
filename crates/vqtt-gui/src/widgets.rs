@@ -72,7 +72,76 @@ pub fn empty_state(ui: &mut Ui, tokens: &Tokens, text: &str, height: f32) {
 ///
 /// The mark is not a fault. It says that the tool will correct the difference.
 pub fn diff_mark(ui: &mut Ui, tokens: &Tokens, message: &str) {
-    ui.label(mono("●", 9.0, tokens.warn)).on_hover_text(message);
+    dot_icon(ui, 9.0, tokens.warn).on_hover_text(message);
+}
+
+/// A filled dot.
+pub fn dot_icon(ui: &mut Ui, size: f32, color: Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), size * 0.34, color);
+    response
+}
+
+/// The six dots that say a row takes a drag.
+pub fn drag_handle_icon(ui: &mut Ui, size: f32, color: Color32) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(size * 0.7, size), egui::Sense::hover());
+    let radius = (size * 0.08).max(0.9);
+    let step_x = rect.width() * 0.45;
+    let step_y = rect.height() * 0.26;
+    let first = rect.center() - egui::vec2(step_x * 0.5, step_y);
+    for row in 0..3 {
+        for column in 0..2 {
+            let at = first + egui::vec2(step_x * column as f32, step_y * row as f32);
+            ui.painter().circle_filled(at, radius, color);
+        }
+    }
+    response
+}
+
+/// The cross that removes a file or shuts a panel.
+pub fn close_icon(ui: &mut Ui, size: f32, color: Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let arm = size * 0.29;
+    let center = rect.center();
+    let stroke = Stroke::new((size * 0.1).max(1.0), color);
+    let painter = ui.painter();
+    painter.line_segment(
+        [center - egui::vec2(arm, arm), center + egui::vec2(arm, arm)],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            center + egui::vec2(arm, -arm),
+            center - egui::vec2(arm, -arm),
+        ],
+        stroke,
+    );
+    response
+}
+
+/// The triangle that opens a section: down when it is open, right when it is shut.
+pub fn caret_icon(ui: &mut Ui, size: f32, color: Color32, open: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let center = rect.center();
+    let half = size * 0.28;
+    let points = if open {
+        vec![
+            center + egui::vec2(-half, -half * 0.62),
+            center + egui::vec2(half, -half * 0.62),
+            center + egui::vec2(0.0, half * 0.86),
+        ]
+    } else {
+        vec![
+            center + egui::vec2(-half * 0.62, -half),
+            center + egui::vec2(-half * 0.62, half),
+            center + egui::vec2(half * 0.86, 0.0),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
+    response
 }
 
 /// A line of small secondary text.

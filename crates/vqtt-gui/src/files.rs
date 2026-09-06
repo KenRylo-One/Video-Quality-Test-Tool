@@ -4,7 +4,9 @@
 //! name to promote it to reference.
 
 use crate::theme::Tokens;
-use crate::widgets::{card, diff_mark, mono, sans, section_header_with};
+use crate::widgets::{
+    card, close_icon, diff_mark, drag_handle_icon, mono, sans, section_header_with,
+};
 use egui::{Margin, Stroke, Ui};
 use std::path::PathBuf;
 use vqtt_core::set::FileId;
@@ -102,8 +104,7 @@ fn row(
             if is_reference {
                 ui.label(mono("REFERENCE", 10.0, tokens.accent));
             } else {
-                ui.label(mono("⠿", 11.0, tokens.text_muted))
-                    .on_hover_text("Drag to reorder.");
+                drag_handle_icon(ui, 11.0, tokens.text_muted).on_hover_text("Drag to reorder.");
             }
 
             if is_reference {
@@ -120,9 +121,7 @@ fn row(
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if !is_reference {
-                    let remove = ui.add(
-                        egui::Label::new(mono("✕", 11.0, tokens.text_muted)).sense(egui::Sense::click()),
-                    );
+                    let remove = close_icon(ui, 12.0, tokens.text_muted);
                     if remove.on_hover_text("Remove this file from the comparison.").clicked() {
                         *action = FilesAction::Remove(id);
                     }

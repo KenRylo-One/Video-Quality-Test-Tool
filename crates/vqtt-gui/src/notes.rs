@@ -4,7 +4,7 @@
 //! it wants the user to read, in one tone. It only appears once a result exists.
 
 use crate::theme::Tokens;
-use crate::widgets::{card, mono, sans};
+use crate::widgets::{card, caret_icon, sans};
 use egui::Ui;
 
 /// Draws the notes card, with a header that opens and closes the list.
@@ -21,7 +21,7 @@ pub fn show(ui: &mut Ui, tokens: &Tokens, notes: &[String]) {
                 ui.label(sans("Notes", 15.0, tokens.text).strong());
                 ui.label(sans(format!("({})", notes.len()), 12.5, tokens.text_muted));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(mono(if open { "▾" } else { "▸" }, 11.0, tokens.text_muted));
+                    caret_icon(ui, 11.0, tokens.text_muted, open);
                 });
             })
             .response;
