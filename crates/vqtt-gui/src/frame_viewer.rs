@@ -875,11 +875,20 @@ fn stage(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, frame: Option<e
     // that is always there reserves room for its own bars, which is what makes a fitted
     // image overflow by the width of the bar and carry one it never needed.
     if size.x > available.x + 0.5 || size.y > available.y + 0.5 {
+        // `ScrollSource::ALL` is what puts the drag on a mouse. The default is
+        // `DragScroll::OnTouch`, which leaves a mouse with the wheel and the bars only.
         egui::ScrollArea::both()
             .id_salt("popout-stage")
+            .scroll_source(egui::scroll_area::ScrollSource::ALL)
             .show(ui, |ui| {
                 let region = egui::vec2(size.x.max(available.x), size.y.max(available.y));
-                let (rect, _) = ui.allocate_exact_size(region, egui::Sense::hover());
+                let (rect, response) = ui.allocate_exact_size(region, egui::Sense::drag());
+                // The pointer says the picture can be moved, before the reader tries.
+                if response.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                } else if response.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                }
                 draw(ui, egui::Rect::from_center_size(rect.center(), size));
             });
     } else {
