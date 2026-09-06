@@ -1379,6 +1379,112 @@ mod tests {
         );
     }
 
+    /// The stage is measured, so fit must leave nothing hanging over either edge. The
+    /// prototype worked the stage out from the height of the bars around it, was a few
+    /// pixels out, and carried a scroll bar it never needed.
+    #[test]
+    fn fit_leaves_a_2160p_frame_inside_the_stage_on_both_axes() {
+        let frame = egui::vec2(3840.0, 2160.0);
+        for stage in [
+            egui::vec2(1280.0, 720.0),
+            egui::vec2(480.0, 320.0),
+            egui::vec2(3000.0, 400.0),
+        ] {
+            let drawn = frame * fit_scale(frame, stage);
+            assert!(
+                drawn.x <= stage.x + 0.01 && drawn.y <= stage.y + 0.01,
+                "{drawn:?} hangs over a stage of {stage:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_frame_of_no_size_never_divides_by_zero_when_fitting() {
+        assert_eq!(
+            fit_scale(egui::vec2(0.0, 0.0), egui::vec2(800.0, 600.0)),
+            1.0
+        );
+    }
+
+    /// The pop-out drags the same line as the panel, so the clamp is the same one.
+    #[test]
+    fn the_wipe_line_clamps_to_a_pop_out_pane() {
+        assert_eq!(wipe_after_drag(0.5, 4000.0, 1280.0), 1.0);
+        assert_eq!(wipe_after_drag(0.5, -4000.0, 1280.0), 0.0);
+    }
+
+    /// Turning wipe on makes the pair one tile, so the reference alone stops being a
+    /// thing to focus.
+    #[test]
+    fn turning_wipe_on_moves_focus_off_the_reference() {
+        let mut viewer = viewer_on(&[40.0, 30.0], Direction::HigherIsBetter, 0);
+        viewer.focused = Focus::Reference;
+        viewer.wipe = true;
+        // The footer runs this rule the moment the box is ticked.
+        if viewer.wipe && viewer.focused == Focus::Reference {
+            viewer.focused = Focus::Encode;
+        }
+
+        assert_eq!(viewer.focused, Focus::Encode);
+    }
+
+    /// Closing the window hands the frames back to the panel. Nothing is re-read.
+    #[test]
+    fn closing_the_pop_out_keeps_the_frame_the_gain_the_focus_and_the_wipe() {
+        let mut viewer = viewer_on(&[40.0, 30.0], Direction::HigherIsBetter, 0);
+        viewer.gain = 8;
+        viewer.focused = Focus::Difference;
+        viewer.wipe_position = 0.25;
+        viewer.popped_out = true;
+
+        viewer.popped_out = false;
+
+        assert_eq!(viewer.frame, Some(0));
+        assert_eq!(viewer.gain, 8);
+        assert_eq!(viewer.focused, Focus::Difference);
+        assert_eq!(viewer.wipe_position, 0.25);
+    }
+
+    /// The panel and the window both step frames. One drain a frame is what stops the
+    /// two of them paying for the same extraction twice.
+    #[test]
+    fn a_step_asks_for_one_extraction_and_only_one() {
+        let mut viewer = viewer_on(&[40.0, 30.0, 50.0], Direction::HigherIsBetter, 0);
+        viewer.gain = 4;
+
+        viewer.step(-1);
+
+        assert_eq!(viewer.take_extract(), Some((1, 4)));
+        assert_eq!(
+            viewer.take_extract(),
+            None,
+            "the second reader gets nothing"
+        );
+    }
+
+    #[test]
+    fn a_new_gain_asks_for_the_difference_and_keeps_the_stills() {
+        let mut viewer = viewer_on(&[40.0], Direction::HigherIsBetter, 0);
+        viewer.slots = vec![
+            slot("reference", "f0_ref.png"),
+            slot("encode", "f0_enc.png"),
+            slot("difference", "f0_diff_x4.png"),
+        ];
+        viewer.gain = 4;
+
+        viewer.set_gain(16);
+
+        assert_eq!(viewer.take_extract(), Some((0, 16)));
+        assert_eq!(viewer.slots.len(), 3, "the two stills stay on screen");
+
+        viewer.set_gain(16);
+        assert_eq!(
+            viewer.take_extract(),
+            None,
+            "the same gain asks for nothing"
+        );
+    }
+
     #[test]
     fn save_ask_is_nothing_before_a_frame_has_loaded() {
         let viewer = FrameViewer {
