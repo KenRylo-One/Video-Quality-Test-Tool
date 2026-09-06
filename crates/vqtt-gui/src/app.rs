@@ -470,6 +470,14 @@ impl eframe::App for VqttApp {
             }
         }
 
+        // The extraction lands on a worker thread, so the images are taken here, once a
+        // frame, before anything draws them.
+        self.frame_viewer.poll(&context);
+        if self.frame_viewer.is_loading() {
+            context.request_repaint_after(std::time::Duration::from_millis(120));
+        }
+        let note = self.viewer_note();
+
         let mut asked_to_export = false;
         let mut open_frame = None;
         let mut wants_frame = None;
@@ -503,7 +511,7 @@ impl eframe::App for VqttApp {
                                 is_running: false,
                             },
                         };
-                        let request = ui
+                        let asked = ui
                             .vertical(|ui| {
                                 right::show(
                                     ui,
@@ -511,30 +519,19 @@ impl eframe::App for VqttApp {
                                     &self.session,
                                     &view,
                                     &mut self.plot_ui,
+                                    &mut self.frame_viewer,
+                                    note,
                                 )
                             })
                             .inner;
-                        match request {
+                        match asked.request {
                             right::Request::Export => asked_to_export = true,
                             right::Request::OpenFrame(encode, metric, frame) => {
                                 open_frame = Some((encode, metric, frame));
                             }
                             right::Request::Nothing => {}
                         }
-                    });
-
-                    if let Some(run_state) = &self.run
-                        && !run_state.series.is_empty()
-                    {
-                        ui.add_space(SECTION_GAP);
-                        self.frame_viewer.poll(ui);
-                        let note = self.viewer_note();
-                        match crate::frame_viewer::show(
-                            ui,
-                            &self.tokens,
-                            &mut self.frame_viewer,
-                            note,
-                        ) {
+                        match asked.viewer {
                             crate::frame_viewer::Ask::Extract(frame, gain) => {
                                 wants_frame = Some((frame, gain));
                             }
@@ -546,10 +543,7 @@ impl eframe::App for VqttApp {
                             } => wants_save = Some((path, label, frame, gain)),
                             crate::frame_viewer::Ask::Nothing => {}
                         }
-                        if self.frame_viewer.is_loading() {
-                            context.request_repaint_after(std::time::Duration::from_millis(120));
-                        }
-                    }
+                    });
 
                     // A run that measured nothing still has notes worth reading. That
                     // is the run where the reader most needs to know what went wrong.

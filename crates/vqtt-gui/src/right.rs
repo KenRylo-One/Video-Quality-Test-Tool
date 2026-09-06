@@ -97,21 +97,41 @@ pub enum Request {
     OpenFrame(FileId, MetricId, u64),
 }
 
+/// What the right column asks for, from the plot and from the frame viewer inside it.
+pub struct Asked {
+    pub request: Request,
+    pub viewer: crate::frame_viewer::Ask,
+}
+
 pub fn show(
     ui: &mut Ui,
     tokens: &Tokens,
     session: &Session,
     run: &RunView,
     state: &mut PlotUi,
-) -> Request {
+    viewer: &mut crate::frame_viewer::FrameViewer,
+    viewer_note: Option<&str>,
+) -> Asked {
     section_header(ui, tokens, "Plot");
 
     let finished = finished_metrics(session, run);
     let mut request = Request::Nothing;
+    let mut ask = crate::frame_viewer::Ask::Nothing;
     if finished.is_empty() {
         empty_state(ui, tokens, "Run a comparison to see the plot.", PLOT_HEIGHT);
     } else {
-        request = plot_section(ui, tokens, session, run, state, &finished);
+        let asked = plot_section(
+            ui,
+            tokens,
+            session,
+            run,
+            state,
+            &finished,
+            viewer,
+            viewer_note,
+        );
+        request = asked.request;
+        ask = asked.viewer;
     }
 
     ui.add_space(16.0);
@@ -120,10 +140,13 @@ pub fn show(
 
     if run.results.is_empty() {
         empty_state(ui, tokens, "The numbers appear here.", 120.0);
-        return request;
+    } else {
+        numbers_table(ui, tokens, session, run.results);
     }
-    numbers_table(ui, tokens, session, run.results);
-    request
+    Asked {
+        request,
+        viewer: ask,
+    }
 }
 
 /// Every metric that has a result, in registry order, so the tabs never reshuffle.
@@ -140,6 +163,7 @@ fn finished_metrics(session: &Session, run: &RunView) -> Vec<MetricId> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plot_section(
     ui: &mut Ui,
     tokens: &Tokens,
@@ -147,7 +171,9 @@ fn plot_section(
     run: &RunView,
     state: &mut PlotUi,
     finished: &[MetricId],
-) -> Request {
+    viewer: &mut crate::frame_viewer::FrameViewer,
+    viewer_note: Option<&str>,
+) -> Asked {
     let active = match state.active_tab {
         Some(metric) if finished.contains(&metric) => metric,
         _ => finished[0],
@@ -176,11 +202,19 @@ fn plot_section(
     ui.add_space(8.0);
 
     let mut request = Request::Nothing;
+    let mut ask = crate::frame_viewer::Ask::Nothing;
     card(ui, tokens, |ui| {
         ui.set_width(ui.available_width());
         request = plot_card(ui, tokens, session, run, state, active);
+        // The viewer belongs to the plot it was opened from, so it sits inside the
+        // plot card under the hover readout, above the numbers.
+        ui.add_space(10.0);
+        ask = crate::frame_viewer::show(ui, tokens, viewer, viewer_note);
     });
-    request
+    Asked {
+        request,
+        viewer: ask,
+    }
 }
 
 fn plot_card(

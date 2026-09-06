@@ -165,7 +165,7 @@ impl FrameViewer {
     }
 
     /// Takes the result of a finished extraction, if one arrived.
-    pub fn poll(&mut self, ui: &Ui) {
+    pub fn poll(&mut self, ctx: &egui::Context) {
         let Some(receiver) = &self.pending else {
             return;
         };
@@ -180,9 +180,9 @@ impl FrameViewer {
                 self.problem = None;
                 self.commands = extracted.commands;
                 self.slots = vec![
-                    load(ui, "reference", &extracted.reference),
-                    load(ui, "encode", &extracted.encode),
-                    load(ui, "difference", &extracted.difference),
+                    load(ctx, "reference", &extracted.reference),
+                    load(ctx, "encode", &extracted.encode),
+                    load(ctx, "difference", &extracted.difference),
                 ];
             }
             Err(error) => {
@@ -224,10 +224,10 @@ impl FrameViewer {
     }
 }
 
-fn load(ui: &Ui, label: &'static str, path: &Path) -> Slot {
+fn load(ctx: &egui::Context, label: &'static str, path: &Path) -> Slot {
     let texture = vqtt_run::read_png(path).ok().map(|image| {
         let size = [image.width as usize, image.height as usize];
-        ui.ctx().load_texture(
+        ctx.load_texture(
             format!("frame-{label}"),
             ColorImage::from_rgba_unmultiplied(size, &image.pixels),
             egui::TextureOptions::LINEAR,
