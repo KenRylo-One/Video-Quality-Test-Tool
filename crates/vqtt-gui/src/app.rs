@@ -13,6 +13,7 @@ use crate::theme::Tokens;
 use crate::widgets::{mono, sans};
 use crate::{right, widgets};
 use std::collections::HashMap;
+use vqtt_core::metric::MetricId;
 use vqtt_run::Session;
 
 /// The width of the left column. It does not stretch.
@@ -131,28 +132,35 @@ did not reach this score. The images below are corrected and the number is not."
         lines
     }
 
-    /// Writes the run to a folder the user chooses, and remembers it for next time.
+    /// The folder Settings holds, or one the user chooses now.
     ///
-    /// The folder picker only appears when Settings holds no export folder yet, so a
-    /// second export takes one click.
+    /// The picker only appears the first time, so export and save-PNG both take one
+    /// click after that.
+    fn resolve_export_folder(&mut self) -> Option<std::path::PathBuf> {
+        match &self.session.settings.export_folder {
+            Some(folder) => Some(folder.clone()),
+            None => {
+                let chosen = rfd::FileDialog::new().pick_folder()?;
+                self.session.settings.export_folder = Some(chosen.clone());
+                self.session.save_settings();
+                Some(chosen)
+            }
+        }
+    }
+
+    /// Writes the run to a folder the user chooses, and remembers it for next time.
     fn export_run(&mut self) {
-        let Some(run_state) = &self.run else {
+        let Some(outcome) = self
+            .run
+            .as_ref()
+            .map(|run_state| run_state.outcome(self.tokens.theme))
+        else {
+            return;
+        };
+        let Some(parent) = self.resolve_export_folder() else {
             return;
         };
 
-        let parent = match &self.session.settings.export_folder {
-            Some(folder) => folder.clone(),
-            None => {
-                let Some(chosen) = rfd::FileDialog::new().pick_folder() else {
-                    return;
-                };
-                self.session.settings.export_folder = Some(chosen.clone());
-                self.session.save_settings();
-                chosen
-            }
-        };
-
-        let outcome = run_state.outcome(self.tokens.theme);
         self.export_report = Some(
             match vqtt_run::write_run(&parent, &self.session, &outcome, crate::fonts::FACES) {
                 Ok(exported) => format!(
@@ -163,6 +171,36 @@ did not reach this score. The images below are corrected and the number is not."
                 Err(error) => format!("The export did not finish: {error}"),
             },
         );
+    }
+
+    /// Copies one cached frame-viewer still to the export folder.
+    ///
+    /// The still is already on disk from extraction, so this is a copy and never a
+    /// re-render.
+    fn save_frame_png(
+        &mut self,
+        path: std::path::PathBuf,
+        label: &'static str,
+        frame: u64,
+        gain: u32,
+    ) {
+        let Some(folder) = self.resolve_export_folder() else {
+            return;
+        };
+        let metric_key = self.frame_viewer.metric.map_or("metric", MetricId::key);
+        let encode_name = self
+            .frame_viewer
+            .encode
+            .and_then(|id| self.session.files.get(id))
+            .map(|file| file.label.as_str())
+            .unwrap_or("encode");
+        let filename = vqtt_run::frame_png_filename(frame, metric_key, encode_name, label, gain);
+        let target = folder.join(filename);
+
+        let result = std::fs::copy(&path, &target)
+            .map(|_| target)
+            .map_err(|error| error.to_string());
+        self.frame_viewer.report_save(result);
     }
 
     /// Adds every file that the user dropped on the window.
@@ -435,6 +473,7 @@ impl eframe::App for VqttApp {
         let mut asked_to_export = false;
         let mut open_frame = None;
         let mut wants_frame = None;
+        let mut wants_save = None;
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::default()
@@ -490,15 +529,22 @@ impl eframe::App for VqttApp {
                         ui.add_space(SECTION_GAP);
                         self.frame_viewer.poll(ui);
                         let note = self.viewer_note();
-                        if let crate::frame_viewer::Ask::Extract(frame, gain) =
-                            crate::frame_viewer::show(
-                                ui,
-                                &self.tokens,
-                                &mut self.frame_viewer,
-                                note,
-                            )
-                        {
-                            wants_frame = Some((frame, gain));
+                        match crate::frame_viewer::show(
+                            ui,
+                            &self.tokens,
+                            &mut self.frame_viewer,
+                            note,
+                        ) {
+                            crate::frame_viewer::Ask::Extract(frame, gain) => {
+                                wants_frame = Some((frame, gain));
+                            }
+                            crate::frame_viewer::Ask::Save {
+                                path,
+                                label,
+                                frame,
+                                gain,
+                            } => wants_save = Some((path, label, frame, gain)),
+                            crate::frame_viewer::Ask::Nothing => {}
                         }
                         if self.frame_viewer.is_loading() {
                             context.request_repaint_after(std::time::Duration::from_millis(120));
@@ -530,6 +576,9 @@ impl eframe::App for VqttApp {
         }
         if let Some((frame, gain)) = wants_frame {
             self.extract_frame(frame, gain);
+        }
+        if let Some((path, label, frame, gain)) = wants_save {
+            self.save_frame_png(path, label, frame, gain);
         }
     }
 }

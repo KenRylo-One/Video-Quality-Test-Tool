@@ -12,7 +12,7 @@
 use crate::theme::{FRAME_VIEWER_GRAY, Tokens};
 use crate::widgets::{card, mono, sans};
 use egui::{ColorImage, TextureHandle, Ui};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use vqtt_core::frames::{FrameValue, step_from};
 use vqtt_core::metric::MetricId;
@@ -30,11 +30,33 @@ type Extraction = vqtt_core::Result<vqtt_run::ExtractedFrame>;
 /// One loaded image, and where it came from.
 struct Slot {
     label: &'static str,
+    path: PathBuf,
     texture: Option<TextureHandle>,
 }
 
+/// Which tile "save PNG" acts on.
+///
+/// Defaults to the encode, since that is the tile the score on screen was measured
+/// from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    Reference,
+    #[default]
+    Encode,
+    Difference,
+}
+
+impl Focus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reference => "reference",
+            Self::Encode => "encode",
+            Self::Difference => "difference",
+        }
+    }
+}
+
 /// The state of the viewer.
-#[derive(Default)]
 pub struct FrameViewer {
     pub open: bool,
     /// The frame on screen, and the encode and metric it was opened from.
@@ -44,6 +66,13 @@ pub struct FrameViewer {
     pub gain: u32,
     /// True when the images are drawn at their own pixel size rather than fitted.
     pub actual_size: bool,
+    /// True when the reference and the encode share one pane behind a draggable line,
+    /// instead of sitting in two tiles side by side.
+    pub wipe: bool,
+    /// Where the wipe line sits, from 0.0 (all reference) to 1.0 (all encode).
+    pub wipe_position: f32,
+    /// The tile "save PNG" acts on. Set by clicking a tile, or a side of the wipe line.
+    pub focused: Focus,
     /// The worst-first order of the active series, for the worse and better controls.
     order: Vec<FrameValue>,
     slots: Vec<Slot>,
@@ -51,14 +80,47 @@ pub struct FrameViewer {
     pending: Option<Receiver<Extraction>>,
     loading_frame: Option<u64>,
     problem: Option<String>,
+    save_status: Option<String>,
     commands: Vec<String>,
 }
 
+impl Default for FrameViewer {
+    fn default() -> Self {
+        Self {
+            open: false,
+            frame: None,
+            encode: None,
+            metric: None,
+            gain: 0,
+            actual_size: false,
+            wipe: false,
+            wipe_position: 0.5,
+            focused: Focus::default(),
+            order: Vec::new(),
+            slots: Vec::new(),
+            pending: None,
+            loading_frame: None,
+            problem: None,
+            save_status: None,
+            commands: Vec::new(),
+        }
+    }
+}
+
 /// What the viewer asks the window to do.
+#[derive(Debug, PartialEq)]
 pub enum Ask {
     Nothing,
     /// Extract this frame at this gain.
     Extract(u64, u32),
+    /// Copy this cached still to the export folder. `label` and `gain` name the file;
+    /// `gain` is only meaningful when `label` is "difference".
+    Save {
+        path: PathBuf,
+        label: &'static str,
+        frame: u64,
+        gain: u32,
+    },
 }
 
 impl FrameViewer {
@@ -141,6 +203,14 @@ impl FrameViewer {
         self.pending.is_some()
     }
 
+    /// Records what a save action did, so it shows next to the controls.
+    pub fn report_save(&mut self, result: Result<PathBuf, String>) {
+        self.save_status = Some(match result {
+            Ok(path) => format!("Saved to {}.", path.display()),
+            Err(error) => format!("The save did not finish: {error}"),
+        });
+    }
+
     fn step(&mut self, step: i64) {
         let Some(frame) = self.frame else {
             return;
@@ -163,7 +233,11 @@ fn load(ui: &Ui, label: &'static str, path: &Path) -> Slot {
             egui::TextureOptions::LINEAR,
         )
     });
-    Slot { label, texture }
+    Slot {
+        label,
+        path: path.to_path_buf(),
+        texture,
+    }
 }
 
 /// Draws the viewer and reports what the reader asked for.
@@ -177,13 +251,17 @@ pub fn show(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, note: Option
         }
 
         ui.add_space(8.0);
-        images(ui, viewer);
+        images(ui, tokens, viewer);
         ui.add_space(8.0);
         ask = controls(ui, tokens, viewer);
 
         if let Some(problem) = &viewer.problem {
             ui.add_space(6.0);
             ui.label(sans(problem, 11.5, tokens.warn));
+        }
+        if let Some(status) = &viewer.save_status {
+            ui.add_space(6.0);
+            ui.label(sans(status, 11.0, tokens.text_secondary));
         }
         if let Some(note) = note {
             ui.add_space(6.0);
@@ -235,7 +313,7 @@ fn header(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) {
 }
 
 /// The three images, on a flat neutral gray that is the same in both themes.
-fn images(ui: &mut Ui, viewer: &FrameViewer) {
+fn images(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) {
     egui::Frame::default()
         .fill(FRAME_VIEWER_GRAY)
         .inner_margin(egui::Margin::same(10))
@@ -250,19 +328,142 @@ fn images(ui: &mut Ui, viewer: &FrameViewer) {
                     }
                     return;
                 }
-                for slot in &viewer.slots {
-                    match &slot.texture {
-                        // No tint, no filter and no opacity. The theme never reaches
-                        // inside these three frames.
-                        Some(texture) => {
-                            let size = fit(texture.size_vec2(), slot_width, viewer.actual_size);
-                            ui.add(egui::Image::new(texture).fit_to_exact_size(size));
-                        }
-                        None => placeholder(ui, slot.label, slot_width, false),
+                if viewer.wipe {
+                    wipe_pane(ui, tokens, viewer, slot_width);
+                } else {
+                    for index in 0..viewer.slots.len() {
+                        tile(ui, tokens, viewer, index, slot_width);
                     }
                 }
             });
         });
+}
+
+/// One image, click to focus it for "save PNG", with a border on the one that is.
+///
+/// No tint, no filter and no opacity. The theme never reaches inside these three
+/// frames, so the focus border is the only chrome allowed to sit on top of one.
+fn tile(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, index: usize, slot_width: f32) {
+    let label = viewer.slots[index].label;
+    let Some(texture) = viewer.slots[index].texture.as_ref() else {
+        placeholder(ui, label, slot_width, false);
+        return;
+    };
+    let size = fit(texture.size_vec2(), slot_width, viewer.actual_size);
+    let response = ui.add(
+        egui::Image::new(texture)
+            .fit_to_exact_size(size)
+            .sense(egui::Sense::click()),
+    );
+
+    let this_focus = focus_of(label);
+    if response.clicked()
+        && let Some(focus) = this_focus
+    {
+        viewer.focused = focus;
+    }
+    if this_focus == Some(viewer.focused) {
+        ui.painter().rect_stroke(
+            response.rect,
+            0.0,
+            egui::Stroke::new(2.0, tokens.accent),
+            egui::StrokeKind::Inside,
+        );
+    }
+}
+
+/// Where the wipe line lands after a horizontal drag, clamped to the pane.
+fn wipe_after_drag(position: f32, delta_x: f32, pane_width: f32) -> f32 {
+    (position + delta_x / pane_width.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// What "save PNG" asks for, given the tile that is focused right now.
+///
+/// `None` when there is nothing to save yet, so the caller can no-op a stray click.
+fn save_ask(viewer: &FrameViewer) -> Option<Ask> {
+    let frame = viewer.frame?;
+    let slot = viewer
+        .slots
+        .iter()
+        .find(|slot| slot.label == viewer.focused.label())?;
+    Some(Ask::Save {
+        path: slot.path.clone(),
+        label: viewer.focused.label(),
+        frame,
+        gain: viewer.gain,
+    })
+}
+
+fn focus_of(label: &str) -> Option<Focus> {
+    match label {
+        "reference" => Some(Focus::Reference),
+        "encode" => Some(Focus::Encode),
+        "difference" => Some(Focus::Difference),
+        _ => None,
+    }
+}
+
+/// The reference and the encode sharing one pane behind a draggable line.
+///
+/// Both stills share one pixel size, because the encode chain always scales to the
+/// reference before the difference is drawn, so the line needs no coordinate mapping.
+fn wipe_pane(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, slot_width: f32) {
+    // Owned copies, not borrows, so `viewer` is free to mutate while this reads.
+    let reference = viewer
+        .slots
+        .iter()
+        .find(|slot| slot.label == "reference")
+        .and_then(|slot| slot.texture.as_ref())
+        .map(|texture| (texture.id(), texture.size_vec2()));
+    let encode = viewer
+        .slots
+        .iter()
+        .find(|slot| slot.label == "encode")
+        .and_then(|slot| slot.texture.as_ref())
+        .map(|texture| (texture.id(), texture.size_vec2()));
+
+    match (reference, encode) {
+        (Some((reference_id, reference_size)), Some((encode_id, _))) => {
+            let size = fit(reference_size, slot_width * 2.0, viewer.actual_size);
+            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+            let painter = ui.painter();
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(reference_id, rect, uv, egui::Color32::WHITE);
+
+            let divider_x = rect.left() + rect.width() * viewer.wipe_position;
+            let right =
+                egui::Rect::from_min_max(egui::pos2(divider_x, rect.top()), rect.right_bottom());
+            painter
+                .with_clip_rect(right)
+                .image(encode_id, rect, uv, egui::Color32::WHITE);
+            painter.line_segment(
+                [
+                    egui::pos2(divider_x, rect.top()),
+                    egui::pos2(divider_x, rect.bottom()),
+                ],
+                egui::Stroke::new(2.0, tokens.accent),
+            );
+
+            if response.dragged() {
+                viewer.wipe_position =
+                    wipe_after_drag(viewer.wipe_position, response.drag_delta().x, rect.width());
+            } else if response.clicked()
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                viewer.focused = if pointer.x < divider_x {
+                    Focus::Reference
+                } else {
+                    Focus::Encode
+                };
+            }
+        }
+        _ => placeholder(ui, "reference", slot_width * 2.0, false),
+    }
+
+    ui.add_space(10.0);
+    // `poll()` always fills all three slots together, so index 2 is the difference
+    // whenever `wipe_pane` runs at all (the caller already handled the empty case).
+    tile(ui, tokens, viewer, 2, slot_width);
 }
 
 fn fit(size: egui::Vec2, slot_width: f32, actual: bool) -> egui::Vec2 {
@@ -291,6 +492,7 @@ fn placeholder(ui: &mut Ui, label: &str, width: f32, loading: bool) {
 fn controls(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) -> Ask {
     let mut ask = Ask::Nothing;
     let before = (viewer.frame, viewer.gain);
+    let mut save_clicked = false;
 
     ui.horizontal_wrapped(|ui| {
         ui.label(sans("gain", 11.0, tokens.text_muted));
@@ -318,6 +520,15 @@ fn controls(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) -> Ask {
             sans("1:1", 11.0, tokens.text_secondary),
         )
         .on_hover_text("Draws each image at its own pixel size.");
+        ui.checkbox(&mut viewer.wipe, sans("wipe", 11.0, tokens.text_secondary))
+            .on_hover_text("Drags a line between the reference and the encode.");
+        if ui
+            .add(egui::Button::new(sans("save PNG", 11.0, tokens.text)))
+            .on_hover_text("Saves the tile in view to the export folder.")
+            .clicked()
+        {
+            save_clicked = true;
+        }
 
         ui.add_space(10.0);
         if ui
@@ -343,6 +554,8 @@ fn controls(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer) -> Ask {
         // in their names and are already on disk.
         viewer.slots.clear();
         ask = Ask::Extract(frame, viewer.gain);
+    } else if save_clicked && let Some(save) = save_ask(viewer) {
+        ask = save;
     }
 
     if !viewer.commands.is_empty() {
@@ -408,6 +621,7 @@ mod tests {
         let mut viewer = viewer_on(&[40.0, 30.0], Direction::HigherIsBetter, 0);
         viewer.slots = vec![Slot {
             label: "reference",
+            path: PathBuf::from("f0_ref.png"),
             texture: None,
         }];
 
@@ -428,5 +642,76 @@ mod tests {
 
         assert_eq!(viewer.value(), None);
         assert_eq!(viewer.rank(), None);
+    }
+
+    #[test]
+    fn focus_of_maps_each_slot_label_and_nothing_else() {
+        assert_eq!(focus_of("reference"), Some(Focus::Reference));
+        assert_eq!(focus_of("encode"), Some(Focus::Encode));
+        assert_eq!(focus_of("difference"), Some(Focus::Difference));
+        assert_eq!(focus_of("nope"), None);
+    }
+
+    #[test]
+    fn a_new_viewer_focuses_the_encode_first() {
+        assert_eq!(FrameViewer::default().focused, Focus::Encode);
+    }
+
+    #[test]
+    fn a_wipe_drag_never_leaves_the_pane() {
+        assert_eq!(wipe_after_drag(0.5, 1000.0, 100.0), 1.0);
+        assert_eq!(wipe_after_drag(0.5, -1000.0, 100.0), 0.0);
+        assert!((wipe_after_drag(0.5, 10.0, 100.0) - 0.6).abs() < 1e-6);
+    }
+
+    fn slot(label: &'static str, path: &str) -> Slot {
+        Slot {
+            label,
+            path: PathBuf::from(path),
+            texture: None,
+        }
+    }
+
+    #[test]
+    fn save_ask_names_whichever_tile_is_focused() {
+        let mut viewer = viewer_on(&[40.0, 30.0], Direction::HigherIsBetter, 0);
+        viewer.gain = 8;
+        viewer.slots = vec![
+            slot("reference", "f0_ref.png"),
+            slot("encode", "f0_enc.png"),
+            slot("difference", "f0_diff_x8.png"),
+        ];
+
+        viewer.focused = Focus::Reference;
+        assert_eq!(
+            save_ask(&viewer),
+            Some(Ask::Save {
+                path: PathBuf::from("f0_ref.png"),
+                label: "reference",
+                frame: 0,
+                gain: 8,
+            })
+        );
+
+        viewer.focused = Focus::Difference;
+        assert_eq!(
+            save_ask(&viewer),
+            Some(Ask::Save {
+                path: PathBuf::from("f0_diff_x8.png"),
+                label: "difference",
+                frame: 0,
+                gain: 8,
+            })
+        );
+    }
+
+    #[test]
+    fn save_ask_is_nothing_before_a_frame_has_loaded() {
+        let viewer = FrameViewer {
+            slots: vec![slot("encode", "f0_enc.png")],
+            ..FrameViewer::default()
+        };
+
+        assert_eq!(save_ask(&viewer), None);
     }
 }
