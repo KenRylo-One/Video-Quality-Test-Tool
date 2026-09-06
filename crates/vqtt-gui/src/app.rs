@@ -298,8 +298,11 @@ did not reach this score. The images below are corrected and the number is not."
             let cache = self.session.cache_snapshot();
             let (sender, receiver) = std::sync::mpsc::channel();
             let signal = context.clone();
+            // The find button of one row asks about that row. Reading all five costs a
+            // full hash of each, and an FFmpeg build alone is over a hundred megabytes.
+            let scope = vqtt_run::ScanScope::One(id);
             std::thread::spawn(move || {
-                let _ = sender.send(vqtt_run::scan_binaries(&settings, cache));
+                let _ = sender.send(vqtt_run::scan_binaries(&settings, cache, scope));
                 signal.request_repaint();
             });
             self.scan = Some(receiver);

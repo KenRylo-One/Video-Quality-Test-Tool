@@ -106,16 +106,26 @@ impl Session {
     /// This blocks. Use `scan_binaries` on a worker thread and then `apply_scan` when
     /// a window is waiting on the answer.
     pub fn refresh_inventory(&mut self) {
-        let scan = scan_binaries(&self.settings, self.cache.clone());
+        let scan = scan_binaries(&self.settings, self.cache.clone(), ScanScope::All);
         self.apply_scan(scan);
     }
 
     /// Installs a scan that ran somewhere else, and writes the cache if it grew.
     ///
+    /// A scan of one binary answers for that binary alone, so it replaces that one
+    /// entry and leaves the rest of the inventory as it was. A binary the scan did not
+    /// find is taken out, because the reader just asked about it and the answer is no.
+    ///
     /// A back end that was missing a moment ago can now run, so the default ticks are
     /// taken again. That only ever adds a tick, and never clears one the reader set.
     pub fn apply_scan(&mut self, scan: BinaryScan) {
-        self.inventory = scan.inventory;
+        match scan.scope {
+            ScanScope::All => self.inventory = scan.inventory,
+            ScanScope::One(id) => match scan.inventory.get(id) {
+                Some(found) => self.inventory.insert(found.clone()),
+                None => self.inventory.remove(id),
+            },
+        }
         self.cache = scan.cache;
         self.tick_defaults();
         if scan.cache_changed
@@ -294,20 +304,50 @@ impl Session {
     }
 }
 
-/// The result of looking for every binary.
+/// Which binaries one scan reads.
+///
+/// A scan costs a full read of each binary it looks at, so a scan reads as few as it
+/// can. The find button of one row asks about that row alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanScope {
+    /// Every binary, which is what a start needs.
+    All,
+    /// One binary, which is what one find button needs.
+    One(BinaryId),
+}
+
+impl ScanScope {
+    /// Whether this scope reads that binary.
+    pub fn covers(self, id: BinaryId) -> bool {
+        match self {
+            Self::All => true,
+            Self::One(only) => only == id,
+        }
+    }
+}
+
+/// The result of looking for the binaries of one scope.
 pub struct BinaryScan {
+    /// What the scan found. It holds only the binaries the scope covered.
     pub inventory: Inventory,
     pub cache: CapabilityCache,
     /// True when a binary was probed for real, so the cache is worth writing.
     pub cache_changed: bool,
+    /// What the scan looked at, so the caller knows what the answer replaces.
+    pub scope: ScanScope,
 }
 
-/// Finds and reads every binary, with no `Session` and no window.
+/// Finds and reads the binaries of one scope, with no `Session` and no window.
 ///
 /// This is slow enough that it must not run on the interface thread. It hashes each
-/// binary to key the cache, and a full FFmpeg build is over a hundred megabytes. A
-/// graphics back end also starts its own device before it prints a version.
-pub fn scan_binaries(settings: &Settings, mut cache: CapabilityCache) -> BinaryScan {
+/// binary it looks at to key the cache, and a full FFmpeg build is over a hundred
+/// megabytes. A graphics back end also starts its own device before it prints a
+/// version. Both are reasons to give the narrowest scope that answers the question.
+pub fn scan_binaries(
+    settings: &Settings,
+    mut cache: CapabilityCache,
+    scope: ScanScope,
+) -> BinaryScan {
     let mut discovery = discovery::Discovery::from_current_exe();
     for (id, path) in &settings.binary_paths {
         discovery.overrides.insert(*id, path.clone());
@@ -317,6 +357,9 @@ pub fn scan_binaries(settings: &Settings, mut cache: CapabilityCache) -> BinaryS
     let mut cache_changed = false;
 
     for id in BinaryId::ALL {
+        if !scope.covers(id) {
+            continue;
+        }
         let Some(path) = discovery::find_path(id, &discovery) else {
             continue;
         };
@@ -345,6 +388,7 @@ pub fn scan_binaries(settings: &Settings, mut cache: CapabilityCache) -> BinaryS
         inventory,
         cache,
         cache_changed,
+        scope,
     }
 }
 
@@ -373,6 +417,92 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet as Set;
     use vqtt_core::capability::{BinaryCapabilities, FoundBinary};
+
+    fn found(id: BinaryId, version: &str) -> FoundBinary {
+        FoundBinary {
+            id,
+            path: PathBuf::from("somewhere"),
+            sha256: "0".into(),
+            capabilities: BinaryCapabilities {
+                version: Some(version.into()),
+                ..BinaryCapabilities::default()
+            },
+        }
+    }
+
+    fn scan_of(scope: ScanScope, found_binaries: Vec<FoundBinary>) -> BinaryScan {
+        let mut inventory = Inventory::new();
+        for binary in found_binaries {
+            inventory.insert(binary);
+        }
+        BinaryScan {
+            inventory,
+            cache: CapabilityCache::new(),
+            cache_changed: false,
+            scope,
+        }
+    }
+
+    #[test]
+    fn a_scope_of_one_covers_that_binary_and_no_other() {
+        let scope = ScanScope::One(BinaryId::Ffvship);
+        assert!(scope.covers(BinaryId::Ffvship));
+        assert!(!scope.covers(BinaryId::Ffmpeg));
+        assert!(ScanScope::All.covers(BinaryId::Ffmpeg));
+    }
+
+    /// Pressing find on one row costs a full read of that binary alone. The answer
+    /// must not throw away what the tool already knows about the other rows.
+    #[test]
+    fn a_scan_of_one_binary_leaves_the_others_alone() {
+        let mut session = session_with(&["psnr"]);
+        session.inventory.insert(found(BinaryId::Ffprobe, "7.1"));
+
+        session.apply_scan(scan_of(
+            ScanScope::One(BinaryId::Ffvship),
+            vec![found(BinaryId::Ffvship, "5.1.1")],
+        ));
+
+        assert!(session.inventory.has(BinaryId::Ffmpeg), "ffmpeg stays");
+        assert!(session.inventory.has(BinaryId::Ffprobe), "ffprobe stays");
+        assert_eq!(
+            session
+                .inventory
+                .get(BinaryId::Ffvship)
+                .and_then(|found| found.capabilities.version.as_deref()),
+            Some("5.1.1")
+        );
+    }
+
+    /// The reader just asked about that row, so an answer of nothing is an answer.
+    #[test]
+    fn a_scan_of_one_binary_that_finds_nothing_takes_that_one_out() {
+        let mut session = session_with(&["psnr"]);
+        session.inventory.insert(found(BinaryId::Ffvship, "5.1.1"));
+
+        session.apply_scan(scan_of(ScanScope::One(BinaryId::Ffvship), Vec::new()));
+
+        assert!(!session.inventory.has(BinaryId::Ffvship), "it is gone");
+        assert!(session.inventory.has(BinaryId::Ffmpeg), "ffmpeg stays");
+    }
+
+    #[test]
+    fn a_scan_of_everything_replaces_the_whole_inventory() {
+        let mut session = session_with(&["psnr"]);
+        session.inventory.insert(found(BinaryId::Ffvship, "5.1.1"));
+
+        session.apply_scan(scan_of(
+            ScanScope::All,
+            vec![found(BinaryId::Ffprobe, "7.1")],
+        ));
+
+        assert!(session.inventory.has(BinaryId::Ffprobe));
+        assert!(
+            !session.inventory.has(BinaryId::Ffmpeg),
+            "the scan is the truth"
+        );
+        assert!(!session.inventory.has(BinaryId::Ffvship));
+    }
 
     fn session_with(filters: &[&str]) -> Session {
         let mut session = Session {

@@ -23,7 +23,7 @@ pub use frames::{
 };
 pub use graph_png::png_from_svg;
 pub use record::{InvocationRecord, RunOutcome, RunRecord};
-pub use session::{BinaryScan, Selection, Session, scan_binaries};
+pub use session::{BinaryScan, ScanScope, Selection, Session, scan_binaries};
 pub use settings::{BUTTERAUGLI_PRESET_NITS, Settings, ThemeChoice, VIEWING_DISTANCES};
 pub use supervisor::{
     EncodeWork, RealProcessRunner, SupervisorEvent, run_plan, run_plan_with_cancel,
