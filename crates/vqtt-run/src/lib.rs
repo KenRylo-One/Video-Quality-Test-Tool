@@ -18,7 +18,7 @@ pub mod vmaf_models;
 pub use cache::CapabilityCache;
 pub use csv_writer::{MetricColumn, SummaryRow, write_frame_csv, write_summary_csv};
 pub use export::{Exported, write_run};
-pub use frames::{ExtractedFrame, Rgba8, extract_frame, read_png};
+pub use frames::{ExtractedFrame, Rgba8, extract_frame, frame_png_filename, read_png};
 pub use graph_png::png_from_svg;
 pub use record::{InvocationRecord, RunOutcome, RunRecord};
 pub use session::{BinaryScan, Selection, Session, scan_binaries};

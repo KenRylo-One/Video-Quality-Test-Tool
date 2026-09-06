@@ -103,6 +103,24 @@ fn quote(text: &str) -> String {
     }
 }
 
+/// Names a PNG the frame viewer saves to the export folder.
+///
+/// The two stills carry no gain in their own names, so only the difference names one.
+pub fn frame_png_filename(
+    frame: u64,
+    metric_key: &str,
+    encode_name: &str,
+    label: &str,
+    gain: u32,
+) -> String {
+    let encode = crate::record::safe_name(encode_name);
+    if label == "difference" {
+        format!("frame{frame}_{metric_key}_{encode}_{label}_x{gain}.png")
+    } else {
+        format!("frame{frame}_{metric_key}_{encode}_{label}.png")
+    }
+}
+
 /// Reads a PNG into plain bytes.
 ///
 /// The rasterizer already carries a PNG decoder, so the tool needs no image crate for
@@ -205,5 +223,25 @@ mod tests {
             "\"C:/Program Files/a.exe\""
         );
         assert_eq!(quote("ffmpeg"), "ffmpeg");
+    }
+
+    #[test]
+    fn the_reference_and_encode_stills_carry_no_gain_in_their_name() {
+        assert_eq!(
+            frame_png_filename(12, "vmaf", "encode a.mp4", "reference", 4),
+            "frame12_vmaf_encode_a.mp4_reference.png"
+        );
+        assert_eq!(
+            frame_png_filename(12, "vmaf", "encode a.mp4", "encode", 4),
+            "frame12_vmaf_encode_a.mp4_encode.png"
+        );
+    }
+
+    #[test]
+    fn the_difference_still_carries_the_gain_it_was_drawn_at() {
+        assert_eq!(
+            frame_png_filename(12, "cambi", "encode a.mp4", "difference", 8),
+            "frame12_cambi_encode_a.mp4_difference_x8.png"
+        );
     }
 }
