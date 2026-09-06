@@ -84,12 +84,14 @@ pub fn dot_icon(ui: &mut Ui, size: f32, color: Color32) -> egui::Response {
 }
 
 /// The six dots that say a row takes a drag.
+///
+/// The icon fills a square, so the column it sits in is the same width on a row that
+/// draws it and on a row that does not.
 pub fn drag_handle_icon(ui: &mut Ui, size: f32, color: Color32) -> egui::Response {
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(size * 0.7, size), egui::Sense::hover());
-    let radius = (size * 0.08).max(0.9);
-    let step_x = rect.width() * 0.45;
-    let step_y = rect.height() * 0.26;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let radius = (size * 0.075).max(0.9);
+    let step_x = size * 0.26;
+    let step_y = size * 0.24;
     let first = rect.center() - egui::vec2(step_x * 0.5, step_y);
     for row in 0..3 {
         for column in 0..2 {

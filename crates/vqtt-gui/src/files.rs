@@ -12,6 +12,10 @@ use std::path::PathBuf;
 use vqtt_core::set::FileId;
 use vqtt_run::Session;
 
+/// The width of the drag handle column, which every row keeps whether it draws a
+/// handle or not.
+const HANDLE_COLUMN: f32 = 14.0;
+
 /// What the user did in this section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilesAction {
@@ -99,22 +103,23 @@ fn row(
     let marks = session.files.diff_marks(id);
     let row_id = egui::Id::new(("file-row", id.0));
 
-    let response = ui.dnd_drag_source(row_id, id, |ui| {
+    let row = ui.vertical(|ui| {
         ui.horizontal(|ui| {
-            if is_reference {
-                ui.label(mono("REFERENCE", 10.0, tokens.accent));
-            } else {
-                drag_handle_icon(ui, 11.0, tokens.text_muted).on_hover_text("Drag to reorder.");
-            }
+            handle(ui, tokens, row_id, id, is_reference);
 
             if is_reference {
+                ui.label(mono("REFERENCE", 10.0, tokens.accent));
                 ui.label(sans(&file.label, 12.5, tokens.text));
             } else {
                 let name = ui.add(
                     egui::Label::new(sans(&file.label, 12.5, tokens.text).underline())
                         .sense(egui::Sense::click()),
                 );
-                if name.on_hover_text("Click to make this file the reference.").clicked() {
+                if name
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("Click to make this file the reference.")
+                    .clicked()
+                {
                     *action = FilesAction::Promote(id);
                 }
             }
@@ -131,6 +136,8 @@ fn row(
 
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
+            // The facts line up under the file name, past the handle column.
+            ui.add_space(HANDLE_COLUMN);
             ui.label(mono(file.info.resolution_label(), 11.0, tokens.text_secondary));
             if marks.resolution {
                 diff_mark(ui, tokens, "The frame size differs from the reference. The tool scales the encode up to match.");
@@ -157,11 +164,32 @@ fn row(
         });
     });
 
-    if let Some(dragged) = response.response.dnd_release_payload::<FileId>()
+    // The whole row takes the drop, so a file can land anywhere on the row it replaces.
+    // Only the handle starts a drag, which is what leaves the file name free to click.
+    if let Some(dragged) = row.response.dnd_release_payload::<FileId>()
         && *dragged != id
     {
         *action = FilesAction::Move(*dragged, id);
     }
+}
+
+/// The grip that starts a drag.
+///
+/// The drag lives on the handle alone. A drag source covers everything inside it with
+/// one drag sense, so a row-wide source swallows the click that promotes a file to
+/// reference. The reference row keeps the column and draws nothing in it, so every file
+/// name starts at the same place and only a row that can move looks like it can.
+fn handle(ui: &mut Ui, tokens: &Tokens, row_id: egui::Id, id: FileId, is_reference: bool) {
+    if is_reference {
+        ui.add_space(HANDLE_COLUMN);
+        return;
+    }
+
+    ui.dnd_drag_source(row_id, id, |ui| {
+        drag_handle_icon(ui, HANDLE_COLUMN, tokens.border_strong);
+    })
+    .response
+    .on_hover_text("Drag to reorder.");
 }
 
 /// The strip that takes dropped files.
