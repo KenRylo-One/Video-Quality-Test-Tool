@@ -263,6 +263,16 @@ fn load(ctx: &egui::Context, label: &'static str, path: &Path) -> Slot {
     }
 }
 
+/// The size that every still is drawn at.
+///
+/// The tool scales each encode up to the reference, so the reference is the measurement
+/// resolution and the shape the viewer holds before it has fetched a frame.
+pub fn reference_size(files: &vqtt_core::set::ComparisonSet) -> Option<egui::Vec2> {
+    files
+        .reference()
+        .map(|file| egui::vec2(file.info.width as f32, file.info.height as f32))
+}
+
 /// Draws the viewer and reports what the reader asked for.
 /// `frame` is the size of the reference, which every still is drawn at.
 pub fn show(
