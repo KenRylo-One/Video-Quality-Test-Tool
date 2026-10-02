@@ -604,7 +604,7 @@ fn fit_scale(frame: egui::Vec2, stage: egui::Vec2) -> f32 {
     if frame.x <= 0.0 || frame.y <= 0.0 {
         return 1.0;
     }
-    (stage.x / frame.x).min(stage.y / frame.y).max(0.02)
+    (stage.x / frame.x).min(stage.y / frame.y).clamp(0.02, 1.0)
 }
 
 /// The box one image sits in, taken from the shape of the reference frame.
@@ -1413,6 +1413,15 @@ mod tests {
             fit_scale(egui::vec2(0.0, 0.0), egui::vec2(800.0, 600.0)),
             1.0
         );
+    }
+
+    /// A fitted frame never grows past its own pixels. Fit only ever shrinks, so the
+    /// reader always sees the real pixels, not a blur stretched over empty space.
+    #[test]
+    fn fit_never_grows_a_frame_smaller_than_the_stage() {
+        let frame = egui::vec2(640.0, 360.0);
+        let stage = egui::vec2(1280.0, 820.0);
+        assert_eq!(fit_scale(frame, stage), 1.0);
     }
 
     /// The pop-out drags the same line as the panel, so the clamp is the same one.
