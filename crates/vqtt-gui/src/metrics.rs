@@ -34,6 +34,45 @@ impl RangeUnit {
     }
 }
 
+/// How the second field sets the end of the range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RangeMode {
+    /// The field is the last frame.
+    #[default]
+    Range,
+    /// The field is how long the range runs, starting from the first field.
+    Length,
+}
+
+impl RangeMode {
+    /// Every mode, in the order of the two buttons.
+    pub const ALL: [RangeMode; 2] = [RangeMode::Range, RangeMode::Length];
+
+    /// The label on the button.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Range => "range",
+            Self::Length => "length",
+        }
+    }
+
+    /// The word between the two fields.
+    fn joiner(self) -> &'static str {
+        match self {
+            Self::Range => "to",
+            Self::Length => "for",
+        }
+    }
+
+    /// What the hover text calls the second field.
+    fn hover(self) -> &'static str {
+        match self {
+            Self::Range => "Sets the first and the last frame directly.",
+            Self::Length => "Sets the first frame and how many frames to measure after it.",
+        }
+    }
+}
+
 /// What the user did in this section.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MetricsAction {
@@ -54,10 +93,14 @@ pub enum MetricsAction {
 pub struct MetricsUi {
     /// Which unit the range control shows.
     pub unit: RangeUnit,
+    /// Whether the second field is the last frame or a length.
+    pub mode: RangeMode,
     /// The text of the first frame field.
     pub start_text: String,
-    /// The text of the last frame field.
+    /// The text of the last frame field, in `RangeMode::Range`.
     pub end_text: String,
+    /// The text of the length field, in `RangeMode::Length`.
+    pub length_text: String,
 }
 
 /// Draws section 2 and reports what the user did.
@@ -173,6 +216,19 @@ pub fn show(
                         state.unit = unit;
                         state.start_text.clear();
                         state.end_text.clear();
+                        state.length_text.clear();
+                    }
+                }
+                ui.add_space(8.0);
+                for mode in RangeMode::ALL {
+                    let picked = ui
+                        .selectable_label(state.mode == mode, mono(mode.label(), 10.5, tokens.text))
+                        .on_hover_text(mode.hover());
+                    if picked.clicked() {
+                        state.mode = mode;
+                        state.start_text.clear();
+                        state.end_text.clear();
+                        state.length_text.clear();
                     }
                 }
             });
@@ -184,6 +240,9 @@ pub fn show(
             if state.end_text.is_empty() {
                 state.end_text = format_unit(last, fps, state.unit);
             }
+            if state.length_text.is_empty() {
+                state.length_text = format_unit(last - first + 1, fps, state.unit);
+            }
 
             ui.horizontal(|ui| {
                 let start_field = ui.add(
@@ -191,27 +250,41 @@ pub fn show(
                         .desired_width(90.0)
                         .font(egui::FontId::monospace(11.0)),
                 );
-                ui.label(sans("to", 11.5, tokens.text_muted));
-                let end_field = ui.add(
-                    egui::TextEdit::singleline(&mut state.end_text)
+                ui.label(sans(state.mode.joiner(), 11.5, tokens.text_muted));
+                let second_text = match state.mode {
+                    RangeMode::Range => &mut state.end_text,
+                    RangeMode::Length => &mut state.length_text,
+                };
+                let second_field = ui.add(
+                    egui::TextEdit::singleline(second_text)
                         .desired_width(90.0)
                         .font(egui::FontId::monospace(11.0)),
                 );
 
-                if start_field.lost_focus() || end_field.lost_focus() {
+                if start_field.lost_focus() || second_field.lost_focus() {
                     let parsed_start = parse_unit(&state.start_text, fps, state.unit)
                         .unwrap_or(first)
                         .min(total - 1);
-                    let parsed_end = parse_unit(&state.end_text, fps, state.unit)
-                        .unwrap_or(last)
-                        .min(total - 1);
-                    let (low, high) = if parsed_start <= parsed_end {
-                        (parsed_start, parsed_end)
-                    } else {
-                        (parsed_end, parsed_start)
+                    let (low, high) = match state.mode {
+                        RangeMode::Range => {
+                            let parsed_end = parse_unit(&state.end_text, fps, state.unit)
+                                .unwrap_or(last)
+                                .min(total - 1);
+                            if parsed_start <= parsed_end {
+                                (parsed_start, parsed_end)
+                            } else {
+                                (parsed_end, parsed_start)
+                            }
+                        }
+                        RangeMode::Length => {
+                            let parsed_length = parse_unit(&state.length_text, fps, state.unit)
+                                .unwrap_or(last - first + 1);
+                            resolve_length(parsed_start, parsed_length, total)
+                        }
                     };
                     state.start_text = format_unit(low, fps, state.unit);
                     state.end_text = format_unit(high, fps, state.unit);
+                    state.length_text = format_unit(high - low + 1, fps, state.unit);
                     action = MetricsAction::Range(low, high);
                 }
             });
@@ -298,6 +371,18 @@ fn range_slider(ui: &mut Ui, tokens: &Tokens, first: &mut u64, last: &mut u64, t
 
     let _ = (low, high);
     changed
+}
+
+/// Turns a start and a length into a first and a last frame, both inside the file.
+///
+/// The length is always at least one frame, so the range never runs backward. A start
+/// past the last frame lands on the last frame, with a length of one.
+fn resolve_length(start: u64, length: u64, total: u64) -> (u64, u64) {
+    let last_index = total.saturating_sub(1);
+    let low = start.min(last_index);
+    let length = length.max(1);
+    let high = low.saturating_add(length - 1).min(last_index);
+    (low, high)
 }
 
 /// Writes one frame number in the unit that the user picked.
@@ -403,5 +488,25 @@ mod tests {
     fn text_that_is_not_a_number_reads_as_nothing() {
         assert_eq!(parse_unit("later", fps(30, 1), RangeUnit::Frames), None);
         assert_eq!(parse_unit("00:00", fps(30, 1), RangeUnit::Timecode), None);
+    }
+
+    #[test]
+    fn a_length_runs_from_the_start_for_that_many_frames() {
+        assert_eq!(resolve_length(100, 50, 10_000), (100, 149));
+    }
+
+    #[test]
+    fn a_length_of_zero_still_measures_one_frame() {
+        assert_eq!(resolve_length(100, 0, 10_000), (100, 100));
+    }
+
+    #[test]
+    fn a_length_past_the_last_frame_clamps_to_it() {
+        assert_eq!(resolve_length(9_990, 50, 10_000), (9_990, 9_999));
+    }
+
+    #[test]
+    fn a_start_past_the_last_frame_clamps_to_it_with_a_length_of_one() {
+        assert_eq!(resolve_length(20_000, 50, 10_000), (9_999, 9_999));
     }
 }
