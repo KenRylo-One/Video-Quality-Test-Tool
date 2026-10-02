@@ -882,12 +882,17 @@ fn stage(ui: &mut Ui, tokens: &Tokens, viewer: &mut FrameViewer, frame: Option<e
             .scroll_source(egui::scroll_area::ScrollSource::ALL)
             .show(ui, |ui| {
                 let region = egui::vec2(size.x.max(available.x), size.y.max(available.y));
-                let (rect, response) = ui.allocate_exact_size(region, egui::Sense::drag());
-                // The pointer says the picture can be moved, before the reader tries.
-                if response.dragged() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                } else if response.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                let (rect, _) = ui.allocate_exact_size(region, egui::Sense::hover());
+                // The scroll area keeps its own hidden widget on this same rect to run
+                // the drag, so a second widget here can never win a hover or a drag
+                // against it. Reading the pointer directly avoids that contest.
+                if ui.rect_contains_pointer(rect) {
+                    let icon = if ui.input(|input| input.pointer.primary_down()) {
+                        egui::CursorIcon::Grabbing
+                    } else {
+                        egui::CursorIcon::Grab
+                    };
+                    ui.ctx().set_cursor_icon(icon);
                 }
                 draw(ui, egui::Rect::from_center_size(rect.center(), size));
             });
